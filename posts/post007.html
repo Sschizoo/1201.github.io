@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>周末技术实验：构建一个轻量级的Web组件框架 - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>周末技术实验：构建一个轻量级的Web组件框架</h1>
+                    <p class="article-date">2025年07月03日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p><strong>Date: March 8, 2024</strong></p>
+<p>这个周末闲来无事，决定尝试构建一个轻量级的Web组件框架。虽然市面上已经有很多成熟的框架，但自己动手实现一个能帮助我更好地理解现代前端框架的工作原理。</p>
+<h2>项目初衷</h2>
+<p>最近在项目中使用React和Vue时，经常会思考这些框架的底层实现原理。与其仅仅停留在理论层面，不如自己动手实现一个简单的版本，通过实践来加深理解。</p>
+<h2>设计目标</h2>
+<p>我给自己的框架设定了几个设计目标：</p>
+<ol>
+<li><strong>轻量化</strong>：核心代码不超过500行</li>
+<li><strong>组件化</strong>：支持组件的定义和复用</li>
+<li><strong>响应式</strong>：状态变化时自动更新视图</li>
+<li><strong>简单易用</strong>：API设计要简洁直观</li>
+</ol>
+<h2>框架核心设计</h2>
+<h3>1. 虚拟DOM实现</h3>
+<p>首先实现一个简单的虚拟DOM系统：</p>
+<pre><code class="language-javascript">// 虚拟DOM节点
+class VNode {
+  constructor(tag, props = {}, children = []) {
+    this.tag = tag;
+    this.props = props;
+    this.children = children;
+    this.key = props.key;
+  }
+}
+
+// 创建虚拟DOM
+function h(tag, props, ...children) {
+  return new VNode(tag, props, children.flat());
+}
+
+// 渲染虚拟DOM到真实DOM
+function render(vnode, container) {
+  if (typeof vnode === 'string' || typeof vnode === 'number') {
+    container.appendChild(document.createTextNode(vnode));
+    return;
+  }
+
+  const element = document.createElement(vnode.tag);
+
+  // 设置属性
+  Object.keys(vnode.props).forEach(key =&gt; {
+    if (key === 'key') return;
+    if (key.startsWith('on')) {
+      const eventName = key.substring(2).toLowerCase();
+      element.addEventListener(eventName, vnode.props[key]);
+    } else {
+      element.setAttribute(key, vnode.props[key]);
+    }
+  });
+
+  // 渲染子节点
+  vnode.children.forEach(child =&gt; {
+    render(child, element);
+  });
+
+  container.appendChild(element);
+}
+</code></pre>
+<h3>2. 组件系统</h3>
+<p>接下来实现组件系统：</p>
+<pre><code class="language-javascript">class Component {
+  constructor(props = {}) {
+    this.props = props;
+    this.state = {};
+    this.element = null;
+    this.mounted = false;
+  }
+
+  setState(newState) {
+    this.state = { ...this.state, ...newState };
+    this.update();
+  }
+
+  update() {
+    if (!this.mounted) return;
+
+    const newVNode = this.render();
+    const newElement = renderToElement(newVNode);
+
+    if (this.element &amp;&amp; this.element.parentNode) {
+      this.element.parentNode.replaceChild(newElement, this.element);
+    }
+
+    this.element = newElement;
+  }
+
+  mount(container) {
+    const vnode = this.render();
+    this.element = renderToElement(vnode);
+    container.appendChild(this.element);
+    this.mounted = true;
+    this.componentDidMount &amp;&amp; this.componentDidMount();
+  }
+
+  unmount() {
+    if (this.element &amp;&amp; this.element.parentNode) {
+      this.element.parentNode.removeChild(this.element);
+    }
+    this.mounted = false;
+    this.componentWillUnmount &amp;&amp; this.componentWillUnmount();
+  }
+
+  render() {
+    throw new Error('Component must implement render method');
+  }
+}
+
+function renderToElement(vnode) {
+  if (typeof vnode === 'string' || typeof vnode === 'number') {
+    return document.createTextNode(vnode);
+  }
+
+  const element = document.createElement(vnode.tag);
+
+  Object.keys(vnode.props).forEach(key =&gt; {
+    if (key === 'key') return;
+    if (key.startsWith('on')) {
+      const eventName = key.substring(2).toLowerCase();
+      element.addEventListener(eventName, vnode.props[key]);
+    } else {
+      element.setAttribute(key, vnode.props[key]);
+    }
+  });
+
+  vnode.children.forEach(child =&gt; {
+    element.appendChild(renderToElement(child));
+  });
+
+  return element;
+}
+</code></pre>
+<h3>3. 响应式系统</h3>
+<p>实现一个简单的响应式系统：</p>
+<pre><code class="language-javascript">class Reactive {
+  constructor(data) {
+    this.data = data;
+    this.observers = [];
+    this.makeReactive(data);
+  }
+
+  makeReactive(obj) {
+    Object.keys(obj).forEach(key =&gt; {
+      this.defineReactive(obj, key, obj[key]);
+    });
+  }
+
+  defineReactive(obj, key, value) {
+    const observers = this.observers;
+
+    Object.defineProperty(obj, key, {
+      get() {
+        return value;
+      },
+      set(newValue) {
+        if (newValue !== value) {
+          value = newValue;
+          observers.forEach(observer =&gt; observer());
+        }
+      },
+      enumerable: true,
+      configurable: true
+    });
+  }
+
+  subscribe(observer) {
+    this.observers.push(observer);
+  }
+
+  unsubscribe(observer) {
+    const index = this.observers.indexOf(observer);
+    if (index &gt; -1) {
+      this.observers.splice(index, 1);
+    }
+  }
+}
+</code></pre>
+<h3>4. 状态管理</h3>
+<p>为了管理应用状态，我实现了一个简单的状态管理器：</p>
+<pre><code class="language-javascript">class Store {
+  constructor(initialState = {}) {
+    this.state = new Reactive(initialState);
+    this.components = new Set();
+  }
+
+  getState() {
+    return this.state.data;
+  }
+
+  setState(newState) {
+    Object.assign(this.state.data, newState);
+  }
+
+  connect(component) {
+    this.components.add(component);
+    this.state.subscribe(() =&gt; {
+      component.update();
+    });
+  }
+
+  disconnect(component) {
+    this.components.delete(component);
+  }
+}
+</code></pre>
+<h2>实际应用示例</h2>
+<p>现在用这个框架构建一个简单的TodoList应用：</p>
+<pre><code class="language-javascript">class TodoItem extends Component {
+  render() {
+    const { todo, onToggle, onDelete } = this.props;
+
+    return h('div', { class: 'todo-item' }, [
+      h('input', {
+        type: 'checkbox',
+        checked: todo.completed,
+        onchange: () =&gt; onToggle(todo.id)
+      }),
+      h('span', { 
+        class: todo.completed ? 'completed' : '',
+        style: todo.completed ? 'text-decoration: line-through' : ''
+      }, todo.text),
+      h('button', {
+        onclick: () =&gt; onDelete(todo.id)
+      }, '删除')
+    ]);
+  }
+}
+
+class TodoList extends Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      todos: [
+        { id: 1, text: '学习JavaScript', completed: false },
+        { id: 2, text: '构建Web框架', completed: true },
+        { id: 3, text: '写技术博客', completed: false }
+      ],
+      inputValue: ''
+    };
+  }
+
+  addTodo = () =&gt; {
+    if (this.state.inputValue.trim()) {
+      const newTodo = {
+        id: Date.now(),
+        text: this.state.inputValue,
+        completed: false
+      };
+
+      this.setState({
+        todos: [...this.state.todos, newTodo],
+        inputValue: ''
+      });
+    }
+  };
+
+  toggleTodo = (id) =&gt; {
+    this.setState({
+      todos: this.state.todos.map(todo =&gt;
+        todo.id === id ? { ...todo, completed: !todo.completed } : todo
+      )
+    });
+  };
+
+  deleteTodo = (id) =&gt; {
+    this.setState({
+      todos: this.state.todos.filter(todo =&gt; todo.id !== id)
+    });
+  };
+
+  handleInputChange = (e) =&gt; {
+    this.setState({ inputValue: e.target.value });
+  };
+
+  render() {
+    return h('div', { class: 'todo-app' }, [
+      h('h1', {}, 'My Todo List'),
+      h('div', { class: 'todo-input' }, [
+        h('input', {
+          type: 'text',
+          value: this.state.inputValue,
+          placeholder: '输入待办事项...',
+          oninput: this.handleInputChange
+        }),
+        h('button', { onclick: this.addTodo }, '添加')
+      ]),
+      h('div', { class: 'todo-list' }, 
+        this.state.todos.map(todo =&gt; 
+          h(TodoItem, {
+            key: todo.id,
+            todo,
+            onToggle: this.toggleTodo,
+            onDelete: this.deleteTodo
+          })
+        )
+      )
+    ]);
+  }
+}
+</code></pre>
+<h3>自定义组件渲染</h3>
+<p>为了支持自定义组件，我需要扩展渲染函数：</p>
+<pre><code class="language-javascript">function renderToElement(vnode) {
+  if (typeof vnode === 'string' || typeof vnode === 'number') {
+    return document.createTextNode(vnode);
+  }
+
+  // 处理自定义组件
+  if (typeof vnode.tag === 'function') {
+    const component = new vnode.tag(vnode.props);
+    const renderedVNode = component.render();
+    return renderToElement(renderedVNode);
+  }
+
+  const element = document.createElement(vnode.tag);
+
+  Object.keys(vnode.props).forEach(key =&gt; {
+    if (key === 'key') return;
+    if (key.startsWith('on')) {
+      const eventName = key.substring(2).toLowerCase();
+      element.addEventListener(eventName, vnode.props[key]);
+    } else {
+      element.setAttribute(key, vnode.props[key]);
+    }
+  });
+
+  vnode.children.forEach(child =&gt; {
+    element.appendChild(renderToElement(child));
+  });
+
+  return element;
+}
+</code></pre>
+<h2>性能优化</h2>
+<h3>1. 虚拟DOM Diff算法</h3>
+<p>实现一个简单的diff算法来优化更新性能：</p>
+<pre><code class="language-javascript">function diff(oldVNode, newVNode) {
+  if (!oldVNode) return { type: 'CREATE', newVNode };
+  if (!newVNode) return { type: 'REMOVE' };
+
+  if (typeof oldVNode !== typeof newVNode) {
+    return { type: 'REPLACE', newVNode };
+  }
+
+  if (typeof oldVNode === 'string' || typeof oldVNode === 'number') {
+    return oldVNode === newVNode ? null : { type: 'TEXT', newVNode };
+  }
+
+  if (oldVNode.tag !== newVNode.tag) {
+    return { type: 'REPLACE', newVNode };
+  }
+
+  const propsDiff = diffProps(oldVNode.props, newVNode.props);
+  const childrenDiff = diffChildren(oldVNode.children, newVNode.children);
+
+  if (propsDiff.length === 0 &amp;&amp; childrenDiff.length === 0) {
+    return null;
+  }
+
+  return {
+    type: 'UPDATE',
+    propsDiff,
+    childrenDiff
+  };
+}
+
+function diffProps(oldProps, newProps) {
+  const patches = [];
+
+  // 检查新增或修改的属性
+  Object.keys(newProps).forEach(key =&gt; {
+    if (oldProps[key] !== newProps[key]) {
+      patches.push({ type: 'SET_PROP', key, value: newProps[key] });
+    }
+  });
+
+  // 检查删除的属性
+  Object.keys(oldProps).forEach(key =&gt; {
+    if (!(key in newProps)) {
+      patches.push({ type: 'REMOVE_PROP', key });
+    }
+  });
+
+  return patches;
+}
+</code></pre>
+<h3>2. 组件缓存</h3>
+<p>实现组件实例的缓存机制：</p>
+<pre><code class="language-javascript">class ComponentCache {
+  constructor() {
+    this.cache = new Map();
+  }
+
+  get(key) {
+    return this.cache.get(key);
+  }
+
+  set(key, component) {
+    this.cache.set(key, component);
+  }
+
+  has(key) {
+    return this.cache.has(key);
+  }
+
+  clear() {
+    this.cache.clear();
+  }
+}
+
+const componentCache = new ComponentCache();
+</code></pre>
+<h2>测试与调试</h2>
+<p>为了确保框架的稳定性，我写了一些简单的测试：</p>
+<pre><code class="language-javascript">// 简单的测试框架
+class TestRunner {
+  constructor() {
+    this.tests = [];
+    this.passed = 0;
+    this.failed = 0;
+  }
+
+  test(name, fn) {
+    this.tests.push({ name, fn });
+  }
+
+  run() {
+    console.log('Running tests...');
+
+    this.tests.forEach(({ name, fn }) =&gt; {
+      try {
+        fn();
+        console.log(`✓ ${name}`);
+        this.passed++;
+      } catch (error) {
+        console.log(`✗ ${name}: ${error.message}`);
+        this.failed++;
+      }
+    });
+
+    console.log(`\nResults: ${this.passed} passed, ${this.failed} failed`);
+  }
+}
+
+// 测试用例
+const runner = new TestRunner();
+
+runner.test('VNode creation', () =&gt; {
+  const vnode = h('div', { class: 'test' }, 'Hello');
+  if (vnode.tag !== 'div') throw new Error('Tag not set correctly');
+  if (vnode.props.class !== 'test') throw new Error('Props not set correctly');
+  if (vnode.children[0] !== 'Hello') throw new Error('Children not set correctly');
+});
+
+runner.test('Component state management', () =&gt; {
+  class TestComponent extends Component {
+    constructor() {
+      super();
+      this.state = { count: 0 };
+    }
+
+    render() {
+      return h('div', {}, this.state.count);
+    }
+  }
+
+  const component = new TestComponent();
+  component.setState({ count: 1 });
+  if (component.state.count !== 1) throw new Error('State not updated correctly');
+});
+
+runner.run();
+</code></pre>
+<h2>实际效果演示</h2>
+<p>最终的TodoList应用运行效果：</p>
+<pre><code class="language-javascript">// 启动应用
+const app = new TodoList();
+app.mount(document.getElementById('app'));
+
+// 添加一些样式
+const styles = `
+  .todo-app {
+    max-width: 500px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+
+  .todo-input {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+
+  .todo-input input {
+    flex: 1;
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+  }
+
+  .todo-input button {
+    padding: 8px 16px;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .todo-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border-bottom: 1px solid #eee;
+  }
+
+  .todo-item.completed {
+    opacity: 0.6;
+  }
+
+  .todo-item button {
+    background: #dc3545;
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+`;
+
+const styleSheet = document.createElement('style');
+styleSheet.textContent = styles;
+document.head.appendChild(styleSheet);
+</code></pre>
+<h2>收获与思考</h2>
+<p>通过这个周末的实验，我获得了很多收获：</p>
+<h3>技术层面</h3>
+<ol>
+<li><strong>深入理解虚拟DOM</strong>：通过实现虚拟DOM，我更好地理解了React等框架的工作原理</li>
+<li><strong>组件化思想</strong>：体验了组件化开发的核心理念和实现方式</li>
+<li><strong>响应式系统</strong>：学习了如何实现简单的响应式数据绑定</li>
+<li><strong>框架设计</strong>：理解了框架设计需要考虑的各种因素</li>
+</ol>
+<h3>设计思考</h3>
+<ol>
+<li><strong>API设计</strong>：好的API应该简洁直观，降低学习成本</li>
+<li><strong>性能优化</strong>：即使是简单的框架，也要考虑性能优化</li>
+<li><strong>可扩展性</strong>：框架应该具备良好的扩展能力</li>
+<li><strong>开发体验</strong>：开发工具和调试支持同样重要</li>
+</ol>
+<h3>不足与改进</h3>
+<ol>
+<li><strong>缺少生命周期管理</strong>：没有完整的组件生命周期管理</li>
+<li><strong>错误处理不足</strong>：缺少完善的错误处理机制</li>
+<li><strong>类型检查</strong>：没有运行时类型检查和开发时类型提示</li>
+<li><strong>性能优化</strong>：diff算法还比较粗糙，有优化空间</li>
+</ol>
+<h2>下一步计划</h2>
+<ol>
+<li><strong>完善生命周期</strong>：实现完整的组件生命周期管理</li>
+<li><strong>路由系统</strong>：添加简单的客户端路由功能</li>
+<li><strong>状态管理</strong>：改进状态管理机制，支持更复杂的状态操作</li>
+<li><strong>开发工具</strong>：开发调试工具，提升开发体验</li>
+<li><strong>文档和示例</strong>：编写完整的文档和更多示例</li>
+</ol>
+<h2>结语</h2>
+<p>这个周末的技术实验让我对前端框架有了更深入的理解。虽然自己实现的框架还很简陋，但通过这个过程，我学到了很多框架设计的核心思想和技术实现细节。</p>
+<p>技术的学习不应该只停留在使用层面，深入理解底层原理能够让我们成为更好的开发者。这种"造轮子"的练习虽然在生产环境中不实用，但对于技术成长来说却是非常有价值的。</p>
+<p>期待在未来的学习中，能够继续深入研究更多的技术原理，不断提升自己的技术能力。</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

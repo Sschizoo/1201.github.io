@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Building Scalable WebSocket Applications with Node.js - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>Building Scalable WebSocket Applications with Node.js</h1>
+                    <p class="article-date">2025年07月03日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p><strong>Date: April 19, 2024</strong></p>
+<p>Real-time communication has become essential in modern web applications. Whether it's chat applications, collaborative editing tools, or live dashboards, WebSockets provide the foundation for instant bidirectional communication. Today I'll share my experience building scalable WebSocket applications with Node.js.</p>
+<h2>WebSocket Fundamentals</h2>
+<h3>Basic WebSocket Server Setup</h3>
+<pre><code class="language-javascript">const WebSocket = require('ws');
+const http = require('http');
+
+class WebSocketServer {
+  constructor(port = 8080) {
+    this.port = port;
+    this.server = null;
+    this.wss = null;
+    this.clients = new Map();
+    this.rooms = new Map();
+  }
+
+  initialize() {
+    // Create HTTP server
+    this.server = http.createServer();
+
+    // Create WebSocket server
+    this.wss = new WebSocket.Server({ server: this.server });
+
+    this.setupWebSocketHandlers();
+    this.setupHeartbeat();
+
+    this.server.listen(this.port, () =&gt; {
+      console.log(`WebSocket server running on port ${this.port}`);
+    });
+  }
+
+  setupWebSocketHandlers() {
+    this.wss.on('connection', (ws, request) =&gt; {
+      console.log('New WebSocket connection');
+
+      // Generate unique client ID
+      const clientId = this.generateClientId();
+      ws.clientId = clientId;
+
+      // Store client
+      this.clients.set(clientId, {
+        ws,
+        rooms: new Set(),
+        lastSeen: Date.now(),
+        metadata: {}
+      });
+
+      // Setup event handlers
+      ws.on('message', (message) =&gt; this.handleMessage(ws, message));
+      ws.on('close', () =&gt; this.handleDisconnection(ws));
+      ws.on('error', (error) =&gt; this.handleError(ws, error));
+      ws.on('pong', () =&gt; this.handlePong(ws));
+
+      // Send welcome message
+      this.sendToClient(ws, {
+        type: 'connection',
+        clientId: clientId,
+        timestamp: Date.now()
+      });
+    });
+  }
+
+  handleMessage(ws, message) {
+    try {
+      const data = JSON.parse(message);
+
+      switch (data.type) {
+        case 'join_room':
+          this.handleJoinRoom(ws, data);
+          break;
+        case 'leave_room':
+          this.handleLeaveRoom(ws, data);
+          break;
+        case 'broadcast':
+          this.handleBroadcast(ws, data);
+          break;
+        case 'private_message':
+          this.handlePrivateMessage(ws, data);
+          break;
+        default:
+          this.sendError(ws, 'Unknown message type');
+      }
+    } catch (error) {
+      this.sendError(ws, 'Invalid message format');
+    }
+  }
+
+  generateClientId() {
+    return `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+}
+</code></pre>
+<h3>Room Management System</h3>
+<pre><code class="language-javascript">class RoomManager {
+  constructor() {
+    this.rooms = new Map();
+  }
+
+  createRoom(roomId, options = {}) {
+    if (this.rooms.has(roomId)) {
+      return this.rooms.get(roomId);
+    }
+
+    const room = {
+      id: roomId,
+      clients: new Set(),
+      metadata: options.metadata || {},
+      maxClients: options.maxClients || 100,
+      isPrivate: options.isPrivate || false,
+      createdAt: Date.now(),
+      lastActivity: Date.now()
+    };
+
+    this.rooms.set(roomId, room);
+    return room;
+  }
+
+  joinRoom(clientId, roomId, client) {
+    const room = this.rooms.get(roomId);
+    if (!room) {
+      throw new Error(`Room ${roomId} does not exist`);
+    }
+
+    if (room.clients.size &gt;= room.maxClients) {
+      throw new Error(`Room ${roomId} is full`);
+    }
+
+    room.clients.add(clientId);
+    client.rooms.add(roomId);
+    room.lastActivity = Date.now();
+
+    return room;
+  }
+
+  leaveRoom(clientId, roomId, client) {
+    const room = this.rooms.get(roomId);
+    if (room) {
+      room.clients.delete(clientId);
+      room.lastActivity = Date.now();
+
+      // Remove empty rooms
+      if (room.clients.size === 0) {
+        this.rooms.delete(roomId);
+      }
+    }
+
+    if (client) {
+      client.rooms.delete(roomId);
+    }
+  }
+
+  broadcastToRoom(roomId, message, excludeClientId = null) {
+    const room = this.rooms.get(roomId);
+    if (!room) return false;
+
+    let sentCount = 0;
+    for (const clientId of room.clients) {
+      if (clientId !== excludeClientId) {
+        const client = this.clients.get(clientId);
+        if (client &amp;&amp; client.ws.readyState === WebSocket.OPEN) {
+          client.ws.send(JSON.stringify(message));
+          sentCount++;
+        }
+      }
+    }
+
+    room.lastActivity = Date.now();
+    return sentCount;
+  }
+}
+</code></pre>
+<h2>Advanced Features Implementation</h2>
+<h3>Message Queue and Persistence</h3>
+<pre><code class="language-javascript">const Redis = require('redis');
+
+class MessageQueue {
+  constructor() {
+    this.redis = Redis.createClient();
+    this.messageHistory = new Map(); // In-memory fallback
+  }
+
+  async storeMessage(roomId, message) {
+    const messageData = {
+      id: this.generateMessageId(),
+      roomId,
+      content: message.content,
+      senderId: message.senderId,
+      timestamp: Date.now(),
+      type: message.type || 'message'
+    };
+
+    try {
+      // Store in Redis with expiration
+      await this.redis.zadd(
+        `room:${roomId}:messages`,
+        messageData.timestamp,
+        JSON.stringify(messageData)
+      );
+
+      // Keep only last 1000 messages
+      await this.redis.zremrangebyrank(
+        `room:${roomId}:messages`,
+        0, -1001
+      );
+
+      // Set expiration for the entire key (7 days)
+      await this.redis.expire(`room:${roomId}:messages`, 7 * 24 * 60 * 60);
+
+    } catch (error) {
+      console.error('Redis error, using memory fallback:', error);
+
+      // Fallback to memory storage
+      if (!this.messageHistory.has(roomId)) {
+        this.messageHistory.set(roomId, []);
+      }
+
+      const roomMessages = this.messageHistory.get(roomId);
+      roomMessages.push(messageData);
+
+      // Keep only last 100 messages in memory
+      if (roomMessages.length &gt; 100) {
+        roomMessages.splice(0, roomMessages.length - 100);
+      }
+    }
+
+    return messageData;
+  }
+
+  async getMessageHistory(roomId, limit = 50, before = null) {
+    try {
+      const max = before || '+inf';
+      const messages = await this.redis.zrevrangebyscore(
+        `room:${roomId}:messages`,
+        max,
+        '-inf',
+        'LIMIT', 0, limit
+      );
+
+      return messages.map(msg =&gt; JSON.parse(msg));
+    } catch (error) {
+      console.error('Redis error, using memory fallback:', error);
+
+      // Fallback to memory
+      const roomMessages = this.messageHistory.get(roomId) || [];
+      return roomMessages.slice(-limit);
+    }
+  }
+
+  generateMessageId() {
+    return `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+}
+</code></pre>
+<h3>Authentication and Authorization</h3>
+<pre><code class="language-javascript">const jwt = require('jsonwebtoken');
+
+class WebSocketAuth {
+  constructor(secretKey) {
+    this.secretKey = secretKey;
+    this.activeSessions = new Map();
+  }
+
+  async authenticateConnection(ws, request) {
+    try {
+      // Extract token from query string or headers
+      const token = this.extractToken(request);
+
+      if (!token) {
+        throw new Error('No authentication token provided');
+      }
+
+      // Verify JWT token
+      const decoded = jwt.verify(token, this.secretKey);
+
+      // Additional validation
+      await this.validateUser(decoded.userId);
+
+      // Store user info in WebSocket
+      ws.userId = decoded.userId;
+      ws.userRole = decoded.role;
+      ws.permissions = decoded.permissions || [];
+
+      // Track active session
+      this.activeSessions.set(ws.clientId, {
+        userId: decoded.userId,
+        clientId: ws.clientId,
+        connectedAt: Date.now()
+      });
+
+      return decoded;
+    } catch (error) {
+      ws.close(1008, 'Authentication failed');
+      throw error;
+    }
+  }
+
+  extractToken(request) {
+    // From query string
+    const url = new URL(request.url, 'http://localhost');
+    const tokenFromQuery = url.searchParams.get('token');
+
+    if (tokenFromQuery) {
+      return tokenFromQuery;
+    }
+
+    // From headers
+    const authHeader = request.headers.authorization;
+    if (authHeader &amp;&amp; authHeader.startsWith('Bearer ')) {
+      return authHeader.substring(7);
+    }
+
+    return null;
+  }
+
+  async validateUser(userId) {
+    // Implement user validation logic
+    // This could check database, cache, etc.
+    return true;
+  }
+
+  hasPermission(ws, permission) {
+    return ws.permissions &amp;&amp; ws.permissions.includes(permission);
+  }
+
+  canJoinRoom(ws, roomId) {
+    // Implement room access control
+    if (roomId.startsWith('admin_') &amp;&amp; ws.userRole !== 'admin') {
+      return false;
+    }
+
+    return true;
+  }
+}
+</code></pre>
+<h3>Load Balancing and Clustering</h3>
+<pre><code class="language-javascript">const cluster = require('cluster');
+const Redis = require('redis');
+const { EventEmitter } = require('events');
+
+class ClusteredWebSocketServer extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.numWorkers = options.numWorkers || require('os').cpus().length;
+    this.port = options.port || 8080;
+    this.redis = Redis.createClient();
+    this.setupRedisSubscriptions();
+  }
+
+  start() {
+    if (cluster.isMaster) {
+      this.startMaster();
+    } else {
+      this.startWorker();
+    }
+  }
+
+  startMaster() {
+    console.log(`Master ${process.pid} is running`);
+
+    // Fork workers
+    for (let i = 0; i &lt; this.numWorkers; i++) {
+      cluster.fork();
+    }
+
+    cluster.on('exit', (worker, code, signal) =&gt; {
+      console.log(`Worker ${worker.process.pid} died`);
+      cluster.fork();
+    });
+  }
+
+  startWorker() {
+    const server = new WebSocketServer(this.port);
+    server.setupClusterCommunication(this);
+    server.initialize();
+
+    console.log(`Worker ${process.pid} started`);
+  }
+
+  setupRedisSubscriptions() {
+    // Subscribe to cluster-wide events
+    this.redis.subscribe('websocket:broadcast');
+    this.redis.subscribe('websocket:room_message');
+    this.redis.subscribe('websocket:user_message');
+
+    this.redis.on('message', (channel, message) =&gt; {
+      const data = JSON.parse(message);
+      this.emit(channel, data);
+    });
+  }
+
+  broadcastToCluster(event, data) {
+    this.redis.publish(`websocket:${event}`, JSON.stringify(data));
+  }
+
+  // Message routing between cluster nodes
+  routeMessage(targetType, targetId, message) {
+    const routingData = {
+      targetType, // 'room', 'user', 'all'
+      targetId,
+      message,
+      senderId: message.senderId,
+      timestamp: Date.now()
+    };
+
+    this.broadcastToCluster(targetType + '_message', routingData);
+  }
+}
+
+// Enhanced WebSocket server with cluster support
+class ClusterAwareWebSocketServer extends WebSocketServer {
+  setupClusterCommunication(clusterManager) {
+    this.clusterManager = clusterManager;
+
+    // Listen for cluster events
+    clusterManager.on('websocket:room_message', (data) =&gt; {
+      this.handleClusterRoomMessage(data);
+    });
+
+    clusterManager.on('websocket:user_message', (data) =&gt; {
+      this.handleClusterUserMessage(data);
+    });
+  }
+
+  handleClusterRoomMessage(data) {
+    const room = this.rooms.get(data.targetId);
+    if (room) {
+      this.broadcastToRoom(data.targetId, data.message, data.senderId);
+    }
+  }
+
+  handleClusterUserMessage(data) {
+    const client = this.findClientByUserId(data.targetId);
+    if (client) {
+      this.sendToClient(client.ws, data.message);
+    }
+  }
+
+  // Override broadcast methods to use cluster
+  broadcastToRoom(roomId, message, excludeClientId = null) {
+    // Local broadcast
+    super.broadcastToRoom(roomId, message, excludeClientId);
+
+    // Cluster broadcast
+    this.clusterManager.routeMessage('room', roomId, {
+      ...message,
+      senderId: excludeClientId
+    });
+  }
+}
+</code></pre>
+<h2>Performance Optimization</h2>
+<h3>Connection Pooling and Resource Management</h3>
+<pre><code class="language-javascript">class ConnectionPool {
+  constructor(maxConnections = 10000) {
+    this.maxConnections = maxConnections;
+    this.activeConnections = 0;
+    this.connectionQueue = [];
+    this.metrics = {
+      totalConnections: 0,
+      peakConnections: 0,
+      rejectedConnections: 0
+    };
+  }
+
+  canAcceptConnection() {
+    return this.activeConnections &lt; this.maxConnections;
+  }
+
+  addConnection(ws) {
+    if (!this.canAcceptConnection()) {
+      this.metrics.rejectedConnections++;
+      ws.close(1013, 'Server at capacity');
+      return false;
+    }
+
+    this.activeConnections++;
+    this.metrics.totalConnections++;
+    this.metrics.peakConnections = Math.max(
+      this.metrics.peakConnections, 
+      this.activeConnections
+    );
+
+    ws.on('close', () =&gt; {
+      this.activeConnections--;
+    });
+
+    return true;
+  }
+
+  getMetrics() {
+    return {
+      ...this.metrics,
+      currentConnections: this.activeConnections,
+      utilizationRate: (this.activeConnections / this.maxConnections) * 100
+    };
+  }
+}
+</code></pre>
+<h3>Message Rate Limiting</h3>
+<pre><code class="language-javascript">class RateLimiter {
+  constructor() {
+    this.clients = new Map();
+    this.globalLimits = {
+      messagesPerSecond: 10,
+      messagesPerMinute: 100,
+      burstLimit: 20
+    };
+  }
+
+  checkRateLimit(clientId, messageType = 'default') {
+    const now = Date.now();
+    const clientData = this.getClientData(clientId, now);
+
+    // Clean old entries
+    this.cleanupOldEntries(clientData, now);
+
+    // Check different time windows
+    const secondCount = this.countMessagesInWindow(clientData.messages, now, 1000);
+    const minuteCount = this.countMessagesInWindow(clientData.messages, now, 60000);
+
+    if (secondCount &gt;= this.globalLimits.messagesPerSecond) {
+      return { allowed: false, reason: 'Rate limit: too many messages per second' };
+    }
+
+    if (minuteCount &gt;= this.globalLimits.messagesPerMinute) {
+      return { allowed: false, reason: 'Rate limit: too many messages per minute' };
+    }
+
+    // Check burst limit
+    if (this.checkBurstLimit(clientData, now)) {
+      return { allowed: false, reason: 'Rate limit: burst limit exceeded' };
+    }
+
+    // Record the message
+    clientData.messages.push(now);
+    return { allowed: true };
+  }
+
+  getClientData(clientId, now) {
+    if (!this.clients.has(clientId)) {
+      this.clients.set(clientId, {
+        messages: [],
+        firstSeen: now,
+        violations: 0
+      });
+    }
+    return this.clients.get(clientId);
+  }
+
+  countMessagesInWindow(messages, now, windowMs) {
+    const windowStart = now - windowMs;
+    return messages.filter(timestamp =&gt; timestamp &gt; windowStart).length;
+  }
+
+  checkBurstLimit(clientData, now) {
+    const recentMessages = clientData.messages.filter(
+      timestamp =&gt; now - timestamp &lt; 5000 // 5 second window
+    );
+
+    return recentMessages.length &gt;= this.globalLimits.burstLimit;
+  }
+
+  cleanupOldEntries(clientData, now) {
+    const oneHourAgo = now - 3600000;
+    clientData.messages = clientData.messages.filter(
+      timestamp =&gt; timestamp &gt; oneHourAgo
+    );
+  }
+}
+</code></pre>
+<h2>Monitoring and Health Checks</h2>
+<h3>Real-time Metrics Collection</h3>
+<pre><code class="language-javascript">class WebSocketMetrics {
+  constructor() {
+    this.metrics = {
+      connections: {
+        total: 0,
+        active: 0,
+        peak: 0
+      },
+      messages: {
+        sent: 0,
+        received: 0,
+        failed: 0
+      },
+      rooms: {
+        total: 0,
+        active: 0
+      },
+      performance: {
+        avgResponseTime: 0,
+        errorRate: 0
+      }
+    };
+
+    this.startMetricsCollection();
+  }
+
+  recordConnection() {
+    this.metrics.connections.total++;
+    this.metrics.connections.active++;
+    this.metrics.connections.peak = Math.max(
+      this.metrics.connections.peak,
+      this.metrics.connections.active
+    );
+  }
+
+  recordDisconnection() {
+    this.metrics.connections.active = Math.max(0, this.metrics.connections.active - 1);
+  }
+
+  recordMessage(type = 'sent') {
+    this.metrics.messages[type]++;
+  }
+
+  recordRoomCreation() {
+    this.metrics.rooms.total++;
+    this.metrics.rooms.active++;
+  }
+
+  recordRoomDeletion() {
+    this.metrics.rooms.active = Math.max(0, this.metrics.rooms.active - 1);
+  }
+
+  startMetricsCollection() {
+    setInterval(() =&gt; {
+      this.publishMetrics();
+    }, 30000); // Every 30 seconds
+  }
+
+  async publishMetrics() {
+    const metricsData = {
+      ...this.metrics,
+      timestamp: new Date().toISOString(),
+      processId: process.pid
+    };
+
+    // Send to monitoring service
+    try {
+      await this.sendToMonitoringService(metricsData);
+    } catch (error) {
+      console.error('Failed to publish metrics:', error);
+    }
+  }
+
+  async sendToMonitoringService(metrics) {
+    // Implementation depends on your monitoring stack
+    // Could be Prometheus, DataDog, CloudWatch, etc.
+    console.log('Metrics:', JSON.stringify(metrics, null, 2));
+  }
+
+  getHealthStatus() {
+    const errorRate = this.metrics.messages.failed / 
+      (this.metrics.messages.sent + this.metrics.messages.received + 1);
+
+    return {
+      status: errorRate &lt; 0.05 ? 'healthy' : 'degraded',
+      metrics: this.metrics,
+      errorRate: errorRate,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
+</code></pre>
+<h3>Health Check Endpoint</h3>
+<pre><code class="language-javascript">const express = require('express');
+
+class HealthCheckServer {
+  constructor(webSocketServer, port = 3001) {
+    this.webSocketServer = webSocketServer;
+    this.app = express();
+    this.port = port;
+    this.setupRoutes();
+  }
+
+  setupRoutes() {
+    this.app.get('/health', (req, res) =&gt; {
+      const health = this.webSocketServer.getHealthStatus();
+      const statusCode = health.status === 'healthy' ? 200 : 503;
+      res.status(statusCode).json(health);
+    });
+
+    this.app.get('/metrics', (req, res) =&gt; {
+      const metrics = this.webSocketServer.getMetrics();
+      res.json(metrics);
+    });
+
+    this.app.get('/connections', (req, res) =&gt; {
+      const connections = {
+        total: this.webSocketServer.clients.size,
+        rooms: this.webSocketServer.rooms.size,
+        details: Array.from(this.webSocketServer.clients.entries()).map(
+          ([clientId, client]) =&gt; ({
+            clientId,
+            rooms: Array.from(client.rooms),
+            connectedAt: client.connectedAt,
+            lastSeen: client.lastSeen
+          })
+        )
+      };
+      res.json(connections);
+    });
+  }
+
+  start() {
+    this.app.listen(this.port, () =&gt; {
+      console.log(`Health check server running on port ${this.port}`);
+    });
+  }
+}
+</code></pre>
+<h2>Testing WebSocket Applications</h2>
+<h3>Integration Testing</h3>
+<pre><code class="language-javascript">const WebSocket = require('ws');
+
+class WebSocketTestClient {
+  constructor(url) {
+    this.url = url;
+    this.ws = null;
+    this.messages = [];
+    this.connected = false;
+  }
+
+  async connect() {
+    return new Promise((resolve, reject) =&gt; {
+      this.ws = new WebSocket(this.url);
+
+      this.ws.on('open', () =&gt; {
+        this.connected = true;
+        resolve();
+      });
+
+      this.ws.on('message', (data) =&gt; {
+        const message = JSON.parse(data);
+        this.messages.push(message);
+      });
+
+      this.ws.on('error', reject);
+    });
+  }
+
+  send(message) {
+    if (this.connected) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  waitForMessage(type, timeout = 5000) {
+    return new Promise((resolve, reject) =&gt; {
+      const timer = setTimeout(() =&gt; {
+        reject(new Error(`Timeout waiting for message type: ${type}`));
+      }, timeout);
+
+      const checkMessages = () =&gt; {
+        const message = this.messages.find(msg =&gt; msg.type === type);
+        if (message) {
+          clearTimeout(timer);
+          resolve(message);
+        } else {
+          setTimeout(checkMessages, 100);
+        }
+      };
+
+      checkMessages();
+    });
+  }
+
+  disconnect() {
+    if (this.ws) {
+      this.ws.close();
+      this.connected = false;
+    }
+  }
+}
+
+// Test suite
+describe('WebSocket Server', () =&gt; {
+  let server;
+  let client1, client2;
+
+  beforeAll(async () =&gt; {
+    server = new WebSocketServer(8081);
+    server.initialize();
+    await new Promise(resolve =&gt; setTimeout(resolve, 1000));
+  });
+
+  afterAll(() =&gt; {
+    server.close();
+  });
+
+  beforeEach(async () =&gt; {
+    client1 = new WebSocketTestClient('ws://localhost:8081');
+    client2 = new WebSocketTestClient('ws://localhost:8081');
+    await client1.connect();
+    await client2.connect();
+  });
+
+  afterEach(() =&gt; {
+    client1.disconnect();
+    client2.disconnect();
+  });
+
+  test('should handle room joining and broadcasting', async () =&gt; {
+    // Client 1 joins room
+    client1.send({
+      type: 'join_room',
+      roomId: 'test_room'
+    });
+
+    const joinResponse = await client1.waitForMessage('room_joined');
+    expect(joinResponse.roomId).toBe('test_room');
+
+    // Client 2 joins same room
+    client2.send({
+      type: 'join_room',
+      roomId: 'test_room'
+    });
+
+    await client2.waitForMessage('room_joined');
+
+    // Client 1 broadcasts message
+    client1.send({
+      type: 'broadcast',
+      roomId: 'test_room',
+      content: 'Hello room!'
+    });
+
+    // Client 2 should receive the broadcast
+    const broadcast = await client2.waitForMessage('broadcast');
+    expect(broadcast.content).toBe('Hello room!');
+  });
+
+  test('should handle rate limiting', async () =&gt; {
+    // Send messages rapidly
+    for (let i = 0; i &lt; 15; i++) {
+      client1.send({
+        type: 'broadcast',
+        roomId: 'test_room',
+        content: `Message ${i}`
+      });
+    }
+
+    // Should receive rate limit error
+    const error = await client1.waitForMessage('error');
+    expect(error.reason).toContain('Rate limit');
+  });
+});
+</code></pre>
+<h2>Deployment and Production Considerations</h2>
+<h3>Docker Configuration</h3>
+<pre><code class="language-dockerfile">FROM node:16-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy source code
+COPY . .
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S websocket -u 1001
+
+# Change ownership
+RUN chown -R websocket:nodejs /app
+USER websocket
+
+EXPOSE 8080 3001
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3001/health || exit 1
+
+CMD [&quot;node&quot;, &quot;server.js&quot;]
+</code></pre>
+<h3>Kubernetes Deployment</h3>
+<pre><code class="language-yaml">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: websocket-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: websocket-server
+  template:
+    metadata:
+      labels:
+        app: websocket-server
+    spec:
+      containers:
+      - name: websocket-server
+        image: websocket-server:latest
+        ports:
+        - containerPort: 8080
+        - containerPort: 3001
+        env:
+        - name: REDIS_URL
+          value: &quot;redis://redis-service:6379&quot;
+        resources:
+          requests:
+            memory: &quot;256Mi&quot;
+            cpu: &quot;250m&quot;
+          limits:
+            memory: &quot;512Mi&quot;
+            cpu: &quot;500m&quot;
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: websocket-service
+spec:
+  selector:
+    app: websocket-server
+  ports:
+  - name: websocket
+    port: 8080
+    targetPort: 8080
+  - name: health
+    port: 3001
+    targetPort: 3001
+  type: LoadBalancer
+</code></pre>
+<h2>Conclusion</h2>
+<p>Building scalable WebSocket applications requires careful consideration of various factors including connection management, message routing, authentication, rate limiting, and monitoring. The patterns and implementations I've shared here provide a solid foundation for building production-ready real-time applications.</p>
+<p>Key takeaways:<br />
+1. <strong>Connection pooling</strong> and resource management are crucial for scalability<br />
+2. <strong>Rate limiting</strong> prevents abuse and ensures fair resource usage<br />
+3. <strong>Clustering</strong> and Redis enable horizontal scaling<br />
+4. <strong>Comprehensive monitoring</strong> helps maintain system health<br />
+5. <strong>Proper testing</strong> ensures reliability in production</p>
+<p>The real-time web is here to stay, and with these tools and patterns, you can build robust WebSocket applications that scale to meet your users' needs.</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

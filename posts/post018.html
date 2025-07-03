@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kubernetes生产环境最佳实践与踩坑总结 - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>Kubernetes生产环境最佳实践与踩坑总结</h1>
+                    <p class="article-date">2025年07月03日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p><strong>Date: May 24, 2024</strong></p>
+<p>最近在公司负责将几个核心服务迁移到Kubernetes平台，在这个过程中积累了不少生产环境的最佳实践经验，也踩了不少坑。今天整理一下这些经验，希望能帮助到其他正在或准备使用K8s的同学。</p>
+<h2>集群架构设计</h2>
+<h3>高可用集群搭建</h3>
+<pre><code class="language-yaml"># 高可用Master节点配置
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v1.27.0
+controlPlaneEndpoint: k8s-api.company.com:6443
+networking:
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: 10.244.0.0/16
+etcd:
+  external:
+    endpoints:
+    - https://etcd1.company.com:2379
+    - https://etcd2.company.com:2379
+    - https://etcd3.company.com:2379
+    caFile: /etc/ssl/etcd/ca.pem
+    certFile: /etc/ssl/etcd/client.pem
+    keyFile: /etc/ssl/etcd/client-key.pem
+apiServer:
+  extraArgs:
+    audit-log-maxage: &quot;30&quot;
+    audit-log-maxbackup: &quot;10&quot;
+    audit-log-maxsize: &quot;100&quot;
+    audit-log-path: /var/log/audit.log
+    enable-admission-plugins: NodeRestriction,ResourceQuota,PodSecurityPolicy
+controllerManager:
+  extraArgs:
+    node-monitor-grace-period: 40s
+    node-monitor-period: 5s
+    pod-eviction-timeout: 5m0s
+scheduler:
+  extraArgs:
+    kube-api-qps: &quot;100&quot;
+    kube-api-burst: &quot;100&quot;
+</code></pre>
+<h3>节点规划与标签管理</h3>
+<pre><code class="language-bash"># 节点标签策略
+kubectl label nodes k8s-worker-1 node-role.kubernetes.io/worker=
+kubectl label nodes k8s-worker-1 node-type=compute
+kubectl label nodes k8s-worker-1 zone=zone-a
+kubectl label nodes k8s-worker-1 instance-type=c5.2xlarge
+
+# 污点策略用于专用节点
+kubectl taint nodes k8s-gpu-1 gpu=true:NoSchedule
+kubectl taint nodes k8s-db-1 database=true:NoSchedule
+
+# 为不同类型的工作负载创建专用节点池
+# 计算密集型节点
+kubectl label nodes k8s-compute-* workload-type=compute-intensive
+
+# 内存密集型节点  
+kubectl label nodes k8s-memory-* workload-type=memory-intensive
+
+# 存储密集型节点
+kubectl label nodes k8s-storage-* workload-type=storage-intensive
+</code></pre>
+<h2>应用部署最佳实践</h2>
+<h3>生产级Deployment配置</h3>
+<pre><code class="language-yaml">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: production
+  labels:
+    app: web-app
+    version: v1.2.3
+    environment: production
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # 确保零停机时间
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+        version: v1.2.3
+      annotations:
+        prometheus.io/scrape: &quot;true&quot;
+        prometheus.io/port: &quot;8080&quot;
+        prometheus.io/path: &quot;/metrics&quot;
+    spec:
+      # 安全上下文
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+
+      # 节点选择
+      nodeSelector:
+        workload-type: compute-intensive
+
+      # 容忍度配置
+      tolerations:
+      - key: &quot;workload-type&quot;
+        operator: &quot;Equal&quot;
+        value: &quot;compute-intensive&quot;
+        effect: &quot;NoSchedule&quot;
+
+      # Pod反亲和性，确保Pod分布在不同节点
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - web-app
+              topologyKey: kubernetes.io/hostname
+
+        # 节点亲和性
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: zone
+                operator: In
+                values:
+                - zone-a
+                - zone-b
+
+      containers:
+      - name: web-app
+        image: myregistry/web-app:v1.2.3
+        imagePullPolicy: Always
+
+        # 端口配置
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+
+        # 环境变量
+        env:
+        - name: NODE_ENV
+          value: &quot;production&quot;
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: url
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: redis-url
+
+        # 资源限制
+        resources:
+          requests:
+            memory: &quot;256Mi&quot;
+            cpu: &quot;250m&quot;
+          limits:
+            memory: &quot;512Mi&quot;
+            cpu: &quot;500m&quot;
+
+        # 健康检查
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+
+        # 启动探针（用于慢启动应用）
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+
+        # 安全上下文
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+        # 挂载点
+        volumeMounts:
+        - name: app-logs
+          mountPath: /var/log/app
+        - name: temp
+          mountPath: /tmp
+        - name: app-config
+          mountPath: /app/config
+          readOnly: true
+
+      # 存储卷
+      volumes:
+      - name: app-logs
+        emptyDir: {}
+      - name: temp
+        emptyDir: {}
+      - name: app-config
+        configMap:
+          name: app-config
+          defaultMode: 0644
+
+      # 镜像拉取密钥
+      imagePullSecrets:
+      - name: registry-credentials
+
+      # 终止宽限期
+      terminationGracePeriodSeconds: 30
+</code></pre>
+<h3>ConfigMap和Secret管理</h3>
+<pre><code class="language-yaml"># ConfigMap配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: production
+data:
+  redis-url: &quot;redis://redis-service:6379&quot;
+  log-level: &quot;info&quot;
+  max-connections: &quot;100&quot;
+  app.properties: |
+    server.port=8080
+    management.endpoints.web.exposure.include=health,metrics,info
+    logging.level.com.company=INFO
+    spring.datasource.hikari.maximum-pool-size=20
+
+---
+# Secret配置
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credentials
+  namespace: production
+type: Opaque
+data:
+  url: cG9zdGdyZXNxbDovL3VzZXI6cGFzc3dvcmRAbG9jYWxob3N0OjU0MzIvZGI=  # base64编码
+  username: dXNlcg==
+  password: cGFzc3dvcmQ=
+
+---
+# Docker Registry Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-credentials
+  namespace: production
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyJteXJlZ2lzdHJ5LmNvbSI6eyJ1c2VybmFtZSI6InVzZXIiLCJwYXNzd29yZCI6InBhc3MiLCJhdXRoIjoiZFhObGNqcHdZWE56In19fQ==
+</code></pre>
+<h2>服务发现与负载均衡</h2>
+<h3>Service配置最佳实践</h3>
+<pre><code class="language-yaml"># ClusterIP Service用于集群内通信
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-service
+  namespace: production
+  labels:
+    app: web-app
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: web-app
+  sessionAffinity: None  # 或者ClientIP用于会话粘性
+
+---
+# LoadBalancer Service用于外部访问
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-lb
+  namespace: production
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-west-2:123456789:certificate/12345
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: &quot;https&quot;
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 443
+    targetPort: 8080
+    protocol: TCP
+    name: https
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: web-app
+</code></pre>
+<h3>Ingress配置</h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web-app-ingress
+  namespace: production
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: &quot;true&quot;
+    nginx.ingress.kubernetes.io/use-regex: &quot;true&quot;
+    nginx.ingress.kubernetes.io/rate-limit: &quot;100&quot;
+    nginx.ingress.kubernetes.io/rate-limit-window: &quot;1m&quot;
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # 会话亲和性
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/session-cookie-name: INGRESSCOOKIE
+    nginx.ingress.kubernetes.io/session-cookie-expires: &quot;86400&quot;
+    nginx.ingress.kubernetes.io/session-cookie-max-age: &quot;86400&quot;
+    nginx.ingress.kubernetes.io/session-cookie-path: /
+spec:
+  tls:
+  - hosts:
+    - api.company.com
+    secretName: api-tls-secret
+  rules:
+  - host: api.company.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: web-app-service
+            port:
+              number: 80
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: web-app-service
+            port:
+              number: 80
+</code></pre>
+<h2>存储管理</h2>
+<h3>PersistentVolume配置</h3>
+<pre><code class="language-yaml"># StorageClass定义
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  iops: &quot;3000&quot;
+  throughput: &quot;125&quot;
+  encrypted: &quot;true&quot;
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+
+---
+# StatefulSet with persistent storage
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: database
+  namespace: production
+spec:
+  serviceName: database-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: database
+  template:
+    metadata:
+      labels:
+        app: database
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:14
+        env:
+        - name: POSTGRES_DB
+          value: myapp
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: password
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        ports:
+        - containerPort: 5432
+          name: postgres
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: 1Gi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 1000m
+        livenessProbe:
+          exec:
+            command:
+            - /usr/bin/pg_isready
+            - -h
+            - localhost
+            - -U
+            - $(POSTGRES_USER)
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /usr/bin/pg_isready
+            - -h
+            - localhost
+            - -U
+            - $(POSTGRES_USER)
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: [&quot;ReadWriteOnce&quot;]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi
+</code></pre>
+<h2>资源管理与自动扩缩容</h2>
+<h3>HorizontalPodAutoscaler配置</h3>
+<pre><code class="language-yaml">apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-app-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: 100
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max
+</code></pre>
+<h3>VerticalPodAutoscaler配置</h3>
+<pre><code class="language-yaml">apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: web-app-vpa
+  namespace: production
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  updatePolicy:
+    updateMode: &quot;Auto&quot;  # 或者&quot;Off&quot;, &quot;Initial&quot;, &quot;Recreation&quot;
+  resourcePolicy:
+    containerPolicies:
+    - containerName: web-app
+      maxAllowed:
+        cpu: 2000m
+        memory: 4Gi
+      minAllowed:
+        cpu: 100m
+        memory: 128Mi
+      controlledResources: [&quot;cpu&quot;, &quot;memory&quot;]
+</code></pre>
+<h3>集群自动扩缩容</h3>
+<pre><code class="language-yaml"># Cluster Autoscaler配置
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      containers:
+      - image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.27.0
+        name: cluster-autoscaler
+        command:
+        - ./cluster-autoscaler
+        - --v=4
+        - --stderrthreshold=info
+        - --cloud-provider=aws
+        - --skip-nodes-with-local-storage=false
+        - --expander=least-waste
+        - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/production
+        - --balance-similar-node-groups
+        - --scale-down-enabled=true
+        - --scale-down-delay-after-add=10m
+        - --scale-down-unneeded-time=10m
+        - --scale-down-utilization-threshold=0.5
+        - --skip-nodes-with-system-pods=false
+        resources:
+          limits:
+            cpu: 100m
+            memory: 300Mi
+          requests:
+            cpu: 100m
+            memory: 300Mi
+</code></pre>
+<h2>监控与日志</h2>
+<h3>Prometheus监控配置</h3>
+<pre><code class="language-yaml"># ServiceMonitor for application metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: web-app-metrics
+  namespace: production
+  labels:
+    app: web-app
+spec:
+  selector:
+    matchLabels:
+      app: web-app
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
+
+---
+# PrometheusRule for alerting
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: web-app-alerts
+  namespace: production
+spec:
+  groups:
+  - name: web-app.rules
+    rules:
+    - alert: HighCPUUsage
+      expr: rate(container_cpu_usage_seconds_total{pod=~&quot;web-app-.*&quot;}[5m]) * 100 &gt; 80
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: &quot;High CPU usage detected&quot;
+        description: &quot;Pod {{ $labels.pod }} CPU usage is above 80%&quot;
+
+    - alert: HighMemoryUsage
+      expr: container_memory_usage_bytes{pod=~&quot;web-app-.*&quot;} / container_spec_memory_limit_bytes * 100 &gt; 90
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: &quot;High memory usage detected&quot;
+        description: &quot;Pod {{ $labels.pod }} memory usage is above 90%&quot;
+
+    - alert: PodCrashLooping
+      expr: increase(kube_pod_container_status_restarts_total{pod=~&quot;web-app-.*&quot;}[1h]) &gt; 5
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: &quot;Pod is crash looping&quot;
+        description: &quot;Pod {{ $labels.pod }} has restarted more than 5 times in the last hour&quot;
+</code></pre>
+<h3>日志收集配置</h3>
+<pre><code class="language-yaml"># Fluent Bit DaemonSet配置
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: logging
+spec:
+  selector:
+    matchLabels:
+      name: fluent-bit
+  template:
+    metadata:
+      labels:
+        name: fluent-bit
+    spec:
+      serviceAccountName: fluent-bit
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: fluent-bit
+        image: fluent/fluent-bit:2.1.8
+        ports:
+        - containerPort: 2020
+        env:
+        - name: FLUENT_ELASTICSEARCH_HOST
+          value: &quot;elasticsearch-service&quot;
+        - name: FLUENT_ELASTICSEARCH_PORT
+          value: &quot;9200&quot;
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: fluent-bit-config
+          mountPath: /fluent-bit/etc/
+        resources:
+          limits:
+            memory: 200Mi
+            cpu: 100m
+          requests:
+            memory: 100Mi
+            cpu: 50m
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: fluent-bit-config
+        configMap:
+          name: fluent-bit-config
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: logging
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*.log
+        Parser            docker
+        Tag               kube.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     50MB
+        Skip_Long_Lines   On
+
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_URL            https://kubernetes.default.svc:443
+        Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           On
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude Off
+
+    [OUTPUT]
+        Name  es
+        Match *
+        Host  ${FLUENT_ELASTICSEARCH_HOST}
+        Port  ${FLUENT_ELASTICSEARCH_PORT}
+        Index fluent-bit
+        Type  _doc
+</code></pre>
+<h2>安全实践</h2>
+<h3>RBAC配置</h3>
+<pre><code class="language-yaml"># ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web-app-sa
+  namespace: production
+
+---
+# Role定义
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: production
+  name: web-app-role
+rules:
+- apiGroups: [&quot;&quot;]
+  resources: [&quot;configmaps&quot;, &quot;secrets&quot;]
+  verbs: [&quot;get&quot;, &quot;list&quot;]
+- apiGroups: [&quot;&quot;]
+  resources: [&quot;pods&quot;]
+  verbs: [&quot;get&quot;, &quot;list&quot;, &quot;watch&quot;]
+
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-app-rolebinding
+  namespace: production
+subjects:
+- kind: ServiceAccount
+  name: web-app-sa
+  namespace: production
+roleRef:
+  kind: Role
+  name: web-app-role
+  apiGroup: rbac.authorization.k8s.io
+</code></pre>
+<h3>NetworkPolicy配置</h3>
+<pre><code class="language-yaml">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-app-netpol
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: web-app
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - podSelector:
+        matchLabels:
+          app: nginx-ingress
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: database
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []  # 允许DNS查询
+    ports:
+    - protocol: UDP
+      port: 53
+</code></pre>
+<h3>PodSecurityPolicy配置</h3>
+<pre><code class="language-yaml">apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: restricted-psp
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+  readOnlyRootFilesystem: true
+</code></pre>
+<h2>踩坑总结</h2>
+<h3>1. 资源限制设置不当</h3>
+<pre><code class="language-yaml"># 错误示例：资源限制过低
+resources:
+  limits:
+    memory: &quot;128Mi&quot;  # 太低，容易OOMKilled
+    cpu: &quot;100m&quot;      # 太低，性能不足
+  requests:
+    memory: &quot;64Mi&quot;   # 太低
+    cpu: &quot;50m&quot;       # 太低
+
+# 正确示例：合理的资源限制
+resources:
+  limits:
+    memory: &quot;512Mi&quot;  # 给足够的内存空间
+    cpu: &quot;500m&quot;      # 适当的CPU限制
+  requests:
+    memory: &quot;256Mi&quot;  # 请求值是限制值的一半
+    cpu: &quot;250m&quot;      # 保证基本性能需求
+</code></pre>
+<h3>2. 健康检查配置问题</h3>
+<pre><code class="language-yaml"># 错误配置：探针间隔太短
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5   # 太短，应用可能还没启动完成
+  periodSeconds: 5         # 太频繁
+  timeoutSeconds: 1        # 太短，网络抖动就失败
+  failureThreshold: 1      # 太严格，一次失败就重启
+
+# 正确配置
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 30  # 给应用足够的启动时间
+  periodSeconds: 10        # 合理的检查间隔
+  timeoutSeconds: 5        # 足够的超时时间
+  failureThreshold: 3      # 允许偶发失败
+</code></pre>
+<h3>3. HPA配置陷阱</h3>
+<pre><code class="language-bash"># 常见问题：metrics-server没有正确安装或配置
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+# 检查metrics-server状态
+kubectl get deployment metrics-server -n kube-system
+
+# 查看节点资源使用情况
+kubectl top nodes
+
+# 查看Pod资源使用情况
+kubectl top pods -n production
+</code></pre>
+<h3>4. 存储相关问题</h3>
+<pre><code class="language-bash"># 常见问题：PV回收策略不当导致数据丢失
+# 检查StorageClass的回收策略
+kubectl get storageclass -o yaml
+
+# 修改PV的回收策略
+kubectl patch pv pv-name -p '{&quot;spec&quot;:{&quot;persistentVolumeReclaimPolicy&quot;:&quot;Retain&quot;}}'
+
+# 查看PVC状态
+kubectl get pvc -A
+
+# 排查存储问题
+kubectl describe pvc pvc-name -n namespace
+</code></pre>
+<h3>5. 网络问题排查</h3>
+<pre><code class="language-bash"># 检查Pod网络连通性
+kubectl exec -it pod-name -- ping target-pod-ip
+
+# 检查服务发现
+kubectl exec -it pod-name -- nslookup service-name
+
+# 检查NetworkPolicy是否阻止了通信
+kubectl get networkpolicy -n namespace
+
+# 查看Ingress状态
+kubectl get ingress -A
+kubectl describe ingress ingress-name -n namespace
+</code></pre>
+<h2>生产环境checklist</h2>
+<h3>部署前检查</h3>
+<pre><code class="language-bash">#!/bin/bash
+# 生产环境部署检查脚本
+
+echo &quot;🔍 开始生产环境部署前检查...&quot;
+
+# 1. 检查资源配额
+echo &quot;1. 检查资源配额...&quot;
+kubectl describe quota -n production
+
+# 2. 检查节点状态
+echo &quot;2. 检查节点状态...&quot;
+kubectl get nodes -o wide
+
+# 3. 检查镜像是否存在
+echo &quot;3. 检查镜像...&quot;
+IMAGE=$(grep &quot;image:&quot; deployment.yaml | awk '{print $2}')
+docker pull $IMAGE &amp;&amp; echo &quot;✅ 镜像检查通过&quot; || echo &quot;❌ 镜像拉取失败&quot;
+
+# 4. 验证配置文件
+echo &quot;4. 验证配置文件...&quot;
+kubectl apply --dry-run=client -f . &amp;&amp; echo &quot;✅ 配置文件验证通过&quot; || echo &quot;❌ 配置文件有误&quot;
+
+# 5. 检查依赖服务
+echo &quot;5. 检查依赖服务...&quot;
+kubectl get svc database-service redis-service -n production
+
+# 6. 检查存储
+echo &quot;6. 检查存储...&quot;
+kubectl get pvc -n production
+
+# 7. 检查安全策略
+echo &quot;7. 检查安全策略...&quot;
+kubectl auth can-i create pods --as=system:serviceaccount:production:web-app-sa -n production
+
+echo &quot;✅ 部署前检查完成&quot;
+</code></pre>
+<h3>部署后验证</h3>
+<pre><code class="language-bash">#!/bin/bash
+# 部署后验证脚本
+
+NAMESPACE=&quot;production&quot;
+APP_NAME=&quot;web-app&quot;
+
+echo &quot;🔍 开始部署后验证...&quot;
+
+# 1. 检查Pod状态
+echo &quot;1. 检查Pod状态...&quot;
+kubectl get pods -n $NAMESPACE -l app=$APP_NAME
+
+# 2. 检查服务端点
+echo &quot;2. 检查服务端点...&quot;
+kubectl get endpoints -n $NAMESPACE
+
+# 3. 检查健康检查
+echo &quot;3. 检查健康检查...&quot;
+kubectl describe pod -n $NAMESPACE -l app=$APP_NAME | grep -A 5 &quot;Liveness\|Readiness&quot;
+
+# 4. 检查日志
+echo &quot;4. 检查应用日志...&quot;
+kubectl logs -n $NAMESPACE -l app=$APP_NAME --tail=50
+
+# 5. 检查指标
+echo &quot;5. 检查指标...&quot;
+kubectl top pods -n $NAMESPACE -l app=$APP_NAME
+
+# 6. 进行健康检查调用
+echo &quot;6. 进行健康检查...&quot;
+SERVICE_IP=$(kubectl get svc $APP_NAME-service -n $NAMESPACE -o jsonpath='{.spec.clusterIP}')
+kubectl run test-pod --rm -i --tty --image=curlimages/curl -- curl http://$SERVICE_IP/health
+
+echo &quot;✅ 部署后验证完成&quot;
+</code></pre>
+<h2>总结</h2>
+<p>Kubernetes生产环境的运维确实复杂，但通过合理的配置和最佳实践，可以构建出稳定、高效的容器化平台。关键要点：</p>
+<ol>
+<li><strong>安全第一</strong>：RBAC、NetworkPolicy、SecurityContext一个都不能少</li>
+<li><strong>监控完善</strong>：指标、日志、告警体系要完整</li>
+<li><strong>资源合理</strong>：CPU、内存、存储配置要根据实际情况调整</li>
+<li><strong>高可用设计</strong>：多副本、反亲和性、健康检查不可缺少</li>
+<li><strong>自动化运维</strong>：HPA、VPA、集群自动扩缩容提高运维效率</li>
+</ol>
+<p>在生产环境中使用Kubernetes是一个持续学习和优化的过程，希望这些经验能帮助大家少踩一些坑，更快地构建稳定的K8s集群。</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

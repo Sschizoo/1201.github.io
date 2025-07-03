@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>使用Python进行数据分析入门 - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>使用Python进行数据分析入门</h1>
+                    <p class="article-date">2025年1月20日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p>最近开始学习使用Python进行数据分析，发现这是一个非常强大且实用的技能。今天想分享一下我的学习心得。</p>
+<h2>为什么选择Python？</h2>
+<p>Python在数据分析领域有着独特的优势：</p>
+<ol>
+<li><strong>语法简洁</strong>：相比其他语言，Python的语法更接近自然语言，容易上手</li>
+<li><strong>生态丰富</strong>：有pandas、numpy、matplotlib等强大的数据分析库</li>
+<li><strong>社区活跃</strong>：遇到问题很容易找到解决方案</li>
+</ol>
+<h2>必备的库</h2>
+<h3>1. NumPy</h3>
+<p>NumPy是Python科学计算的基础库，提供了高效的多维数组对象和各种计算工具。</p>
+<h3>2. Pandas</h3>
+<p>Pandas是建立在NumPy之上的，提供了DataFrame这种表格型的数据结构，非常适合处理结构化数据。</p>
+<h3>3. Matplotlib</h3>
+<p>Matplotlib是最基础的绘图库，可以创建各种静态、动态和交互式的图表。</p>
+<h2>简单示例</h2>
+<p>这里是一个简单的数据分析示例：</p>
+<pre><code class="language-python">import pandas as pd
+import matplotlib.pyplot as plt
+
+# 读取数据
+data = pd.read_csv('sales.csv')
+
+# 数据预览
+print(data.head())
+
+# 简单统计
+print(data.describe())
+
+# 绘制图表
+data['sales'].plot(kind='line')
+plt.show()
+</code></pre>
+<h2>学习建议</h2>
+<ol>
+<li><strong>动手实践</strong>：看再多教程不如自己动手写代码</li>
+<li><strong>项目驱动</strong>：找一个感兴趣的数据集，尝试分析它</li>
+<li><strong>循序渐进</strong>：从简单的开始，逐步增加难度</li>
+</ol>
+<p>希望这篇文章对想要学习数据分析的朋友有所帮助！</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

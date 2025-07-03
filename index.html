@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的博客</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <div class="search-section">
+                <h2>Article List</h2>
+                <div class="search-container">
+                    <input type="text" id="searchInput" placeholder="Search articles by title, content, or date..." class="search-input">
+                    <button id="searchButton" class="search-button">Search</button>
+                    <button id="clearButton" class="clear-button">Clear</button>
+                </div>
+            </div>
+            <div class="article-list" id="articleList">
+                <!-- 文章列表将通过JavaScript动态加载 -->
+            </div>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 公式无双 奇解无穷. All rights reserved.</p>
+    </footer>
+    
+    <script src="script.js"></script>
+</body>
+</html>
