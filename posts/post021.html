@@ -1,0 +1,1264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web性能优化深度实践：从毫秒级优化到用户体验提升 - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>Web性能优化深度实践：从毫秒级优化到用户体验提升</h1>
+                    <p class="article-date">2025年07月03日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p><strong>Date: June 14, 2024</strong></p>
+<p>性能优化是前端开发中永恒的话题。最近花了几个月时间对公司的主要Web应用进行深度性能优化，从加载时间到交互响应，每一个毫秒的提升都意味着更好的用户体验。今天分享一下这次优化的完整过程和收获。</p>
+<h2>性能现状分析</h2>
+<h3>性能指标基线测量</h3>
+<p>在开始优化之前，我们先建立了完整的性能监控体系：</p>
+<pre><code class="language-javascript">// 性能监控工具
+class PerformanceMonitor {
+  constructor() {
+    this.metrics = {};
+    this.observers = {};
+    this.initMonitoring();
+  }
+
+  initMonitoring() {
+    this.observePageLoad();
+    this.observeLCP();
+    this.observeFID();
+    this.observeCLS();
+    this.observeTTFB();
+    this.observeCustomMetrics();
+  }
+
+  // 观察页面加载性能
+  observePageLoad() {
+    window.addEventListener('load', () =&gt; {
+      const navigation = performance.getEntriesByType('navigation')[0];
+
+      this.metrics.pageLoad = {
+        dns: navigation.domainLookupEnd - navigation.domainLookupStart,
+        tcp: navigation.connectEnd - navigation.connectStart,
+        ttfb: navigation.responseStart - navigation.requestStart,
+        download: navigation.responseEnd - navigation.responseStart,
+        domParse: navigation.domContentLoadedEventEnd - navigation.responseEnd,
+        total: navigation.loadEventEnd - navigation.navigationStart
+      };
+
+      this.sendMetrics('page-load', this.metrics.pageLoad);
+    });
+  }
+
+  // 观察最大内容绘制(LCP)
+  observeLCP() {
+    const observer = new PerformanceObserver((list) =&gt; {
+      const entries = list.getEntries();
+      const lastEntry = entries[entries.length - 1];
+
+      this.metrics.lcp = lastEntry.startTime;
+      this.sendMetrics('lcp', this.metrics.lcp);
+    });
+
+    observer.observe({ entryTypes: ['largest-contentful-paint'] });
+    this.observers.lcp = observer;
+  }
+
+  // 观察首次输入延迟(FID)
+  observeFID() {
+    const observer = new PerformanceObserver((list) =&gt; {
+      const entries = list.getEntries();
+      entries.forEach(entry =&gt; {
+        this.metrics.fid = entry.processingStart - entry.startTime;
+        this.sendMetrics('fid', this.metrics.fid);
+      });
+    });
+
+    observer.observe({ entryTypes: ['first-input'] });
+    this.observers.fid = observer;
+  }
+
+  // 观察累积布局偏移(CLS)
+  observeCLS() {
+    let clsValue = 0;
+    let clsEntries = [];
+    let sessionValue = 0;
+    let sessionEntries = [];
+
+    const observer = new PerformanceObserver((list) =&gt; {
+      const entries = list.getEntries();
+
+      for (const entry of entries) {
+        if (!entry.hadRecentInput) {
+          const firstSessionEntry = sessionEntries[0];
+          const lastSessionEntry = sessionEntries[sessionEntries.length - 1];
+
+          if (sessionValue &amp;&amp; 
+              entry.startTime - lastSessionEntry.startTime &lt; 1000 &amp;&amp;
+              entry.startTime - firstSessionEntry.startTime &lt; 5000) {
+            sessionValue += entry.value;
+            sessionEntries.push(entry);
+          } else {
+            sessionValue = entry.value;
+            sessionEntries = [entry];
+          }
+
+          if (sessionValue &gt; clsValue) {
+            clsValue = sessionValue;
+            clsEntries = [...sessionEntries];
+
+            this.metrics.cls = clsValue;
+            this.sendMetrics('cls', this.metrics.cls);
+          }
+        }
+      }
+    });
+
+    observer.observe({ entryTypes: ['layout-shift'] });
+    this.observers.cls = observer;
+  }
+
+  // 自定义指标监控
+  observeCustomMetrics() {
+    // 首屏渲染时间
+    this.markCustomMetric('first-paint');
+
+    // API响应时间
+    this.observeAPIPerformance();
+
+    // 资源加载时间
+    this.observeResourceTiming();
+  }
+
+  markCustomMetric(name) {
+    performance.mark(`${name}-start`);
+
+    return () =&gt; {
+      performance.mark(`${name}-end`);
+      performance.measure(name, `${name}-start`, `${name}-end`);
+
+      const measure = performance.getEntriesByName(name)[0];
+      this.metrics[name] = measure.duration;
+      this.sendMetrics(name, measure.duration);
+    };
+  }
+
+  observeAPIPerformance() {
+    const originalFetch = window.fetch;
+
+    window.fetch = async (...args) =&gt; {
+      const start = performance.now();
+      const url = args[0];
+
+      try {
+        const response = await originalFetch(...args);
+        const duration = performance.now() - start;
+
+        this.sendMetrics('api-performance', {
+          url,
+          duration,
+          status: response.status,
+          size: response.headers.get('content-length')
+        });
+
+        return response;
+      } catch (error) {
+        const duration = performance.now() - start;
+
+        this.sendMetrics('api-error', {
+          url,
+          duration,
+          error: error.message
+        });
+
+        throw error;
+      }
+    };
+  }
+
+  sendMetrics(type, data) {
+    // 发送到分析服务
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/api/analytics/performance', JSON.stringify({
+        type,
+        data,
+        timestamp: Date.now(),
+        userAgent: navigator.userAgent,
+        url: window.location.href
+      }));
+    }
+  }
+}
+
+// 初始化性能监控
+const perfMonitor = new PerformanceMonitor();
+</code></pre>
+<h3>性能问题识别</h3>
+<p>通过一段时间的数据收集，我们发现了主要的性能问题：</p>
+<pre><code class="language-javascript">const performanceIssues = {
+  加载性能: {
+    LCP: &quot;4.2秒 (目标: &lt;2.5秒)&quot;,
+    FCP: &quot;2.8秒 (目标: &lt;1.8秒)&quot;,
+    TTI: &quot;6.5秒 (目标: &lt;3.8秒)&quot;,
+    主要问题: [
+      &quot;JavaScript包体积过大 (3.2MB)&quot;,
+      &quot;图片未优化 (平均2MB)&quot;,
+      &quot;字体加载阻塞渲染&quot;,
+      &quot;第三方脚本过多&quot;
+    ]
+  },
+
+  交互性能: {
+    FID: &quot;280ms (目标: &lt;100ms)&quot;,
+    TBT: &quot;850ms (目标: &lt;200ms)&quot;,
+    主要问题: [
+      &quot;主线程长任务过多&quot;,
+      &quot;JavaScript执行时间长&quot;,
+      &quot;事件处理器注册过多&quot;,
+      &quot;频繁的DOM操作&quot;
+    ]
+  },
+
+  视觉稳定性: {
+    CLS: &quot;0.28 (目标: &lt;0.1)&quot;,
+    主要问题: [
+      &quot;图片尺寸未预设&quot;,
+      &quot;字体交换导致布局偏移&quot;,
+      &quot;广告和第三方内容&quot;,
+      &quot;动态内容注入&quot;
+    ]
+  }
+};
+</code></pre>
+<h2>资源优化策略</h2>
+<h3>代码分割与懒加载</h3>
+<pre><code class="language-javascript">// 路由级代码分割
+import { lazy, Suspense } from 'react';
+import { Routes, Route } from 'react-router-dom';
+import LoadingSpinner from './components/LoadingSpinner';
+
+// 懒加载组件
+const Home = lazy(() =&gt; import('./pages/Home'));
+const Dashboard = lazy(() =&gt; import('./pages/Dashboard'));
+const Profile = lazy(() =&gt; import('./pages/Profile'));
+const Settings = lazy(() =&gt; import('./pages/Settings'));
+
+// 预加载重要路由
+const preloadRoute = (routeComponent) =&gt; {
+  const componentImport = routeComponent();
+  return componentImport;
+};
+
+// 在用户可能访问前预加载
+const preloadDashboard = () =&gt; preloadRoute(() =&gt; import('./pages/Dashboard'));
+const preloadProfile = () =&gt; preloadRoute(() =&gt; import('./pages/Profile'));
+
+function App() {
+  return (
+    &lt;Suspense fallback={&lt;LoadingSpinner /&gt;}&gt;
+      &lt;Routes&gt;
+        &lt;Route 
+          path=&quot;/&quot; 
+          element={&lt;Home /&gt;}
+          onMouseEnter={preloadDashboard} // 鼠标悬停时预加载
+        /&gt;
+        &lt;Route path=&quot;/dashboard&quot; element={&lt;Dashboard /&gt;} /&gt;
+        &lt;Route path=&quot;/profile&quot; element={&lt;Profile /&gt;} /&gt;
+        &lt;Route path=&quot;/settings&quot; element={&lt;Settings /&gt;} /&gt;
+      &lt;/Routes&gt;
+    &lt;/Suspense&gt;
+  );
+}
+
+// 组件级懒加载
+const LazyComponent = lazy(() =&gt; 
+  import('./components/HeavyComponent').then(module =&gt; ({
+    default: module.HeavyComponent
+  }))
+);
+
+// 条件懒加载
+function ConditionalLazyLoad({ shouldLoad, children }) {
+  const [Component, setComponent] = useState(null);
+
+  useEffect(() =&gt; {
+    if (shouldLoad &amp;&amp; !Component) {
+      import('./components/ConditionalComponent')
+        .then(module =&gt; setComponent(() =&gt; module.default));
+    }
+  }, [shouldLoad, Component]);
+
+  if (!shouldLoad) return children;
+  if (!Component) return &lt;LoadingSpinner /&gt;;
+
+  return &lt;Component /&gt;;
+}
+</code></pre>
+<h3>图片优化方案</h3>
+<pre><code class="language-javascript">// 响应式图片组件
+import { useState, useRef, useEffect } from 'react';
+
+function OptimizedImage({ 
+  src, 
+  alt, 
+  width, 
+  height, 
+  loading = 'lazy',
+  className = '',
+  placeholder = 'blur'
+}) {
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [error, setError] = useState(false);
+  const imgRef = useRef();
+
+  // 生成不同尺寸的图片URL
+  const generateSrcSet = (src) =&gt; {
+    const sizes = [320, 480, 768, 1024, 1280, 1920];
+    return sizes.map(size =&gt; 
+      `${src}?w=${size}&amp;q=75 ${size}w`
+    ).join(', ');
+  };
+
+  // 生成sizes属性
+  const generateSizes = () =&gt; {
+    return '(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw';
+  };
+
+  // WebP支持检测
+  const supportsWebP = () =&gt; {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
+    return canvas.toDataURL('image/webp').indexOf('webp') &gt; -1;
+  };
+
+  // 获取优化后的图片URL
+  const getOptimizedSrc = (originalSrc) =&gt; {
+    const format = supportsWebP() ? 'webp' : 'jpg';
+    return `${originalSrc}?format=${format}&amp;q=80`;
+  };
+
+  useEffect(() =&gt; {
+    // 交叉观察器实现真正的懒加载
+    if (loading === 'lazy' &amp;&amp; imgRef.current) {
+      const observer = new IntersectionObserver(
+        (entries) =&gt; {
+          entries.forEach(entry =&gt; {
+            if (entry.isIntersecting) {
+              const img = entry.target;
+              img.src = img.dataset.src;
+              img.srcset = img.dataset.srcset;
+              observer.unobserve(img);
+            }
+          });
+        },
+        { rootMargin: '50px' }
+      );
+
+      observer.observe(imgRef.current);
+      return () =&gt; observer.disconnect();
+    }
+  }, [loading]);
+
+  const handleLoad = () =&gt; {
+    setIsLoaded(true);
+  };
+
+  const handleError = () =&gt; {
+    setError(true);
+  };
+
+  if (error) {
+    return (
+      &lt;div 
+        className={`image-error ${className}`}
+        style={{ width, height, backgroundColor: '#f0f0f0' }}
+      &gt;
+        Failed to load image
+      &lt;/div&gt;
+    );
+  }
+
+  return (
+    &lt;div className={`image-container ${className}`} style={{ width, height }}&gt;
+      {/* 占位符 */}
+      {!isLoaded &amp;&amp; placeholder === 'blur' &amp;&amp; (
+        &lt;div 
+          className=&quot;image-placeholder&quot;
+          style={{
+            width: '100%',
+            height: '100%',
+            backgroundColor: '#f0f0f0',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+          }}
+        &gt;
+          &lt;div className=&quot;spinner&quot; /&gt;
+        &lt;/div&gt;
+      )}
+
+      &lt;picture&gt;
+        {/* WebP格式 */}
+        &lt;source 
+          type=&quot;image/webp&quot;
+          srcSet={generateSrcSet(src.replace(/\.(jpg|jpeg|png)$/, '.webp'))}
+          sizes={generateSizes()}
+        /&gt;
+
+        {/* 原始格式回退 */}
+        &lt;img
+          ref={imgRef}
+          src={loading === 'lazy' ? undefined : getOptimizedSrc(src)}
+          data-src={loading === 'lazy' ? getOptimizedSrc(src) : undefined}
+          data-srcset={loading === 'lazy' ? generateSrcSet(src) : undefined}
+          srcSet={loading === 'lazy' ? undefined : generateSrcSet(src)}
+          sizes={generateSizes()}
+          alt={alt}
+          width={width}
+          height={height}
+          loading={loading}
+          onLoad={handleLoad}
+          onError={handleError}
+          style={{
+            transition: 'opacity 0.3s ease',
+            opacity: isLoaded ? 1 : 0
+          }}
+        /&gt;
+      &lt;/picture&gt;
+    &lt;/div&gt;
+  );
+}
+
+// 图片预加载工具
+class ImagePreloader {
+  constructor() {
+    this.cache = new Set();
+    this.loading = new Set();
+  }
+
+  preload(urls) {
+    return Promise.all(
+      urls.map(url =&gt; this.preloadSingle(url))
+    );
+  }
+
+  preloadSingle(url) {
+    if (this.cache.has(url)) {
+      return Promise.resolve();
+    }
+
+    if (this.loading.has(url)) {
+      return new Promise(resolve =&gt; {
+        const checkLoaded = () =&gt; {
+          if (this.cache.has(url)) {
+            resolve();
+          } else {
+            setTimeout(checkLoaded, 100);
+          }
+        };
+        checkLoaded();
+      });
+    }
+
+    this.loading.add(url);
+
+    return new Promise((resolve, reject) =&gt; {
+      const img = new Image();
+
+      img.onload = () =&gt; {
+        this.cache.add(url);
+        this.loading.delete(url);
+        resolve();
+      };
+
+      img.onerror = () =&gt; {
+        this.loading.delete(url);
+        reject(new Error(`Failed to preload image: ${url}`));
+      };
+
+      img.src = url;
+    });
+  }
+}
+
+const imagePreloader = new ImagePreloader();
+
+// 在路由变化时预加载下一页图片
+function useImagePreloading() {
+  const location = useLocation();
+
+  useEffect(() =&gt; {
+    const preloadImages = async () =&gt; {
+      // 根据当前路由预判下一步可能访问的图片
+      const route = location.pathname;
+      let imagesToPreload = [];
+
+      switch (route) {
+        case '/':
+          imagesToPreload = ['/images/dashboard-preview.jpg'];
+          break;
+        case '/dashboard':
+          imagesToPreload = ['/images/chart1.jpg', '/images/chart2.jpg'];
+          break;
+        default:
+          break;
+      }
+
+      if (imagesToPreload.length &gt; 0) {
+        try {
+          await imagePreloader.preload(imagesToPreload);
+        } catch (error) {
+          console.warn('Image preloading failed:', error);
+        }
+      }
+    };
+
+    preloadImages();
+  }, [location]);
+}
+</code></pre>
+<h3>字体优化</h3>
+<pre><code class="language-css">/* 字体加载优化 */
+@font-face {
+  font-family: 'CustomFont';
+  src: url('/fonts/custom-font.woff2') format('woff2'),
+       url('/fonts/custom-font.woff') format('woff');
+  font-display: swap; /* 使用系统字体直到自定义字体加载完成 */
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'CustomFont';
+  src: url('/fonts/custom-font-bold.woff2') format('woff2'),
+       url('/fonts/custom-font-bold.woff') format('woff');
+  font-display: swap;
+  font-weight: 700;
+  font-style: normal;
+}
+
+/* 字体预加载 */
+.font-preload {
+  position: absolute;
+  left: -9999px;
+  visibility: hidden;
+  font-family: 'CustomFont';
+  font-weight: 400;
+}
+
+.font-preload-bold {
+  position: absolute;
+  left: -9999px;
+  visibility: hidden;
+  font-family: 'CustomFont';
+  font-weight: 700;
+}
+</code></pre>
+<pre><code class="language-javascript">// 字体加载检测和优化
+class FontOptimizer {
+  constructor() {
+    this.loadedFonts = new Set();
+    this.fontLoadPromises = new Map();
+  }
+
+  async preloadFont(fontFamily, weight = '400', style = 'normal') {
+    const fontKey = `${fontFamily}-${weight}-${style}`;
+
+    if (this.loadedFonts.has(fontKey)) {
+      return Promise.resolve();
+    }
+
+    if (this.fontLoadPromises.has(fontKey)) {
+      return this.fontLoadPromises.get(fontKey);
+    }
+
+    const promise = this.loadFont(fontFamily, weight, style);
+    this.fontLoadPromises.set(fontKey, promise);
+
+    return promise;
+  }
+
+  async loadFont(fontFamily, weight, style) {
+    try {
+      await document.fonts.load(`${weight} ${style} 16px ${fontFamily}`);
+      this.loadedFonts.add(`${fontFamily}-${weight}-${style}`);
+    } catch (error) {
+      console.warn(`Failed to load font: ${fontFamily}`, error);
+    }
+  }
+
+  async preloadCriticalFonts() {
+    const criticalFonts = [
+      { family: 'CustomFont', weight: '400' },
+      { family: 'CustomFont', weight: '700' }
+    ];
+
+    await Promise.all(
+      criticalFonts.map(font =&gt; 
+        this.preloadFont(font.family, font.weight)
+      )
+    );
+  }
+
+  // 字体加载状态监控
+  observeFontLoading() {
+    if ('fonts' in document) {
+      document.fonts.addEventListener('loadingstart', (event) =&gt; {
+        console.log('Font loading started:', event.fontface.family);
+      });
+
+      document.fonts.addEventListener('loadingerror', (event) =&gt; {
+        console.error('Font loading failed:', event.fontface.family);
+      });
+
+      document.fonts.addEventListener('loadingdone', (event) =&gt; {
+        console.log('Font loading completed:', event.fontface.family);
+      });
+    }
+  }
+}
+
+const fontOptimizer = new FontOptimizer();
+
+// 应用启动时预加载关键字体
+fontOptimizer.preloadCriticalFonts();
+fontOptimizer.observeFontLoading();
+</code></pre>
+<h2>JavaScript性能优化</h2>
+<h3>主线程优化</h3>
+<pre><code class="language-javascript">// Web Worker用于重CPU任务
+class WorkerPool {
+  constructor(workerScript, poolSize = 4) {
+    this.workerScript = workerScript;
+    this.poolSize = poolSize;
+    this.workers = [];
+    this.queue = [];
+    this.initWorkers();
+  }
+
+  initWorkers() {
+    for (let i = 0; i &lt; this.poolSize; i++) {
+      const worker = new Worker(this.workerScript);
+      worker.isIdle = true;
+      this.workers.push(worker);
+    }
+  }
+
+  execute(data) {
+    return new Promise((resolve, reject) =&gt; {
+      const task = { data, resolve, reject };
+
+      const idleWorker = this.workers.find(w =&gt; w.isIdle);
+
+      if (idleWorker) {
+        this.runTask(idleWorker, task);
+      } else {
+        this.queue.push(task);
+      }
+    });
+  }
+
+  runTask(worker, task) {
+    worker.isIdle = false;
+
+    const handleMessage = (event) =&gt; {
+      worker.removeEventListener('message', handleMessage);
+      worker.removeEventListener('error', handleError);
+      worker.isIdle = true;
+
+      task.resolve(event.data);
+      this.processQueue();
+    };
+
+    const handleError = (error) =&gt; {
+      worker.removeEventListener('message', handleMessage);
+      worker.removeEventListener('error', handleError);
+      worker.isIdle = true;
+
+      task.reject(error);
+      this.processQueue();
+    };
+
+    worker.addEventListener('message', handleMessage);
+    worker.addEventListener('error', handleError);
+    worker.postMessage(task.data);
+  }
+
+  processQueue() {
+    if (this.queue.length &gt; 0) {
+      const idleWorker = this.workers.find(w =&gt; w.isIdle);
+      if (idleWorker) {
+        const task = this.queue.shift();
+        this.runTask(idleWorker, task);
+      }
+    }
+  }
+
+  terminate() {
+    this.workers.forEach(worker =&gt; worker.terminate());
+    this.workers = [];
+  }
+}
+
+// 时间切片处理大数据
+function processLargeDataset(data, processor, chunkSize = 1000) {
+  return new Promise((resolve) =&gt; {
+    const results = [];
+    let index = 0;
+
+    function processChunk() {
+      const start = Date.now();
+
+      // 处理数据直到时间片用完或数据处理完
+      while (index &lt; data.length &amp;&amp; Date.now() - start &lt; 5) {
+        const chunk = data.slice(index, index + chunkSize);
+        results.push(...processor(chunk));
+        index += chunkSize;
+      }
+
+      if (index &lt; data.length) {
+        // 让出主线程，下一帧继续处理
+        requestIdleCallback(processChunk);
+      } else {
+        resolve(results);
+      }
+    }
+
+    processChunk();
+  });
+}
+
+// 防抖和节流优化
+function createOptimizedHandler(handler, options = {}) {
+  const {
+    debounce = 0,
+    throttle = 0,
+    immediate = false,
+    leading = true,
+    trailing = true
+  } = options;
+
+  if (debounce &gt; 0) {
+    return debounceHandler(handler, debounce, immediate);
+  }
+
+  if (throttle &gt; 0) {
+    return throttleHandler(handler, throttle, { leading, trailing });
+  }
+
+  return handler;
+}
+
+function debounceHandler(func, delay, immediate) {
+  let timeoutId;
+  let lastCallTime;
+
+  return function executedFunction(...args) {
+    const context = this;
+
+    const later = () =&gt; {
+      timeoutId = null;
+      if (!immediate) func.apply(context, args);
+    };
+
+    const callNow = immediate &amp;&amp; !timeoutId;
+
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(later, delay);
+
+    if (callNow) func.apply(context, args);
+  };
+}
+
+function throttleHandler(func, delay, options = {}) {
+  const { leading = true, trailing = true } = options;
+  let timeoutId;
+  let lastExecTime = 0;
+  let lastArgs;
+  let lastThis;
+
+  return function executedFunction(...args) {
+    const context = this;
+    const now = Date.now();
+
+    if (!lastExecTime &amp;&amp; !leading) lastExecTime = now;
+
+    const remaining = delay - (now - lastExecTime);
+
+    lastArgs = args;
+    lastThis = context;
+
+    if (remaining &lt;= 0 || remaining &gt; delay) {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      lastExecTime = now;
+      func.apply(context, args);
+    } else if (!timeoutId &amp;&amp; trailing) {
+      timeoutId = setTimeout(() =&gt; {
+        lastExecTime = !leading ? 0 : Date.now();
+        timeoutId = null;
+        func.apply(lastThis, lastArgs);
+      }, remaining);
+    }
+  };
+}
+</code></pre>
+<h3>React性能优化</h3>
+<pre><code class="language-javascript">// 高阶组件：性能监控
+function withPerformanceMonitoring(WrappedComponent) {
+  return function PerformanceMonitoredComponent(props) {
+    const componentName = WrappedComponent.displayName || WrappedComponent.name;
+    const renderStart = useRef();
+    const [renderCount, setRenderCount] = useState(0);
+
+    useEffect(() =&gt; {
+      setRenderCount(prev =&gt; prev + 1);
+    });
+
+    useLayoutEffect(() =&gt; {
+      if (renderStart.current) {
+        const renderTime = performance.now() - renderStart.current;
+
+        if (renderTime &gt; 16) { // 超过一帧的时间
+          console.warn(`${componentName} render took ${renderTime.toFixed(2)}ms`);
+        }
+
+        // 发送性能数据
+        if (window.analytics) {
+          window.analytics.track('component-render', {
+            componentName,
+            renderTime,
+            renderCount: renderCount,
+            props: Object.keys(props)
+          });
+        }
+      }
+    });
+
+    renderStart.current = performance.now();
+
+    return &lt;WrappedComponent {...props} /&gt;;
+  };
+}
+
+// 优化的列表组件
+const OptimizedList = memo(function OptimizedList({ 
+  items, 
+  renderItem, 
+  getItemKey = (item, index) =&gt; item.id || index 
+}) {
+  const [visibleRange, setVisibleRange] = useState({ start: 0, end: 50 });
+  const containerRef = useRef();
+  const itemHeight = 50; // 假设固定高度
+
+  // 虚拟滚动
+  const handleScroll = useCallback(
+    throttleHandler((event) =&gt; {
+      const scrollTop = event.target.scrollTop;
+      const containerHeight = event.target.clientHeight;
+
+      const start = Math.floor(scrollTop / itemHeight);
+      const visibleCount = Math.ceil(containerHeight / itemHeight);
+      const end = Math.min(start + visibleCount + 10, items.length); // 额外渲染10个项目
+
+      setVisibleRange({ start: Math.max(0, start - 5), end });
+    }, 16),
+    [itemHeight, items.length]
+  );
+
+  const visibleItems = useMemo(() =&gt; {
+    return items.slice(visibleRange.start, visibleRange.end);
+  }, [items, visibleRange]);
+
+  const totalHeight = items.length * itemHeight;
+  const offsetY = visibleRange.start * itemHeight;
+
+  return (
+    &lt;div
+      ref={containerRef}
+      style={{ height: 400, overflow: 'auto' }}
+      onScroll={handleScroll}
+    &gt;
+      &lt;div style={{ height: totalHeight, position: 'relative' }}&gt;
+        &lt;div style={{ transform: `translateY(${offsetY}px)` }}&gt;
+          {visibleItems.map((item, index) =&gt; {
+            const actualIndex = visibleRange.start + index;
+            return (
+              &lt;div
+                key={getItemKey(item, actualIndex)}
+                style={{ height: itemHeight }}
+              &gt;
+                {renderItem(item, actualIndex)}
+              &lt;/div&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+});
+
+// 智能预加载Hook
+function usePrefetch(shouldPrefetch, prefetchFn, deps = []) {
+  const [isPrefetching, setIsPrefetching] = useState(false);
+  const [prefetchData, setPrefetchData] = useState(null);
+  const prefetchRef = useRef();
+
+  useEffect(() =&gt; {
+    if (shouldPrefetch &amp;&amp; !isPrefetching &amp;&amp; !prefetchData) {
+      setIsPrefetching(true);
+
+      prefetchRef.current = prefetchFn()
+        .then(data =&gt; {
+          setPrefetchData(data);
+          setIsPrefetching(false);
+        })
+        .catch(error =&gt; {
+          console.error('Prefetch failed:', error);
+          setIsPrefetching(false);
+        });
+    }
+
+    return () =&gt; {
+      if (prefetchRef.current) {
+        prefetchRef.current.cancel?.();
+      }
+    };
+  }, [shouldPrefetch, isPrefetching, prefetchData, ...deps]);
+
+  return { data: prefetchData, isLoading: isPrefetching };
+}
+</code></pre>
+<h2>缓存策略优化</h2>
+<h3>Service Worker缓存</h3>
+<pre><code class="language-javascript">// sw.js - Service Worker缓存策略
+const CACHE_NAME = 'app-v1.2.3';
+const STATIC_CACHE = 'static-v1.2.3';
+const DYNAMIC_CACHE = 'dynamic-v1.2.3';
+const IMAGE_CACHE = 'images-v1.2.3';
+
+// 需要缓存的静态资源
+const STATIC_ASSETS = [
+  '/',
+  '/static/js/main.js',
+  '/static/css/main.css',
+  '/manifest.json'
+];
+
+// 安装事件 - 预缓存静态资源
+self.addEventListener('install', event =&gt; {
+  event.waitUntil(
+    caches.open(STATIC_CACHE)
+      .then(cache =&gt; cache.addAll(STATIC_ASSETS))
+      .then(() =&gt; self.skipWaiting())
+  );
+});
+
+// 激活事件 - 清理旧缓存
+self.addEventListener('activate', event =&gt; {
+  event.waitUntil(
+    caches.keys()
+      .then(cacheNames =&gt; {
+        return Promise.all(
+          cacheNames
+            .filter(cacheName =&gt; 
+              cacheName !== STATIC_CACHE &amp;&amp; 
+              cacheName !== DYNAMIC_CACHE &amp;&amp;
+              cacheName !== IMAGE_CACHE
+            )
+            .map(cacheName =&gt; caches.delete(cacheName))
+        );
+      })
+      .then(() =&gt; self.clients.claim())
+  );
+});
+
+// 获取事件 - 实施缓存策略
+self.addEventListener('fetch', event =&gt; {
+  const { request } = event;
+  const url = new URL(request.url);
+
+  // 静态资源 - Cache First
+  if (STATIC_ASSETS.some(asset =&gt; url.pathname.endsWith(asset))) {
+    event.respondWith(cacheFirst(request, STATIC_CACHE));
+    return;
+  }
+
+  // API请求 - Network First
+  if (url.pathname.startsWith('/api/')) {
+    event.respondWith(networkFirst(request, DYNAMIC_CACHE));
+    return;
+  }
+
+  // 图片 - Cache First with Network Fallback
+  if (request.destination === 'image') {
+    event.respondWith(cacheFirst(request, IMAGE_CACHE));
+    return;
+  }
+
+  // 其他请求 - Stale While Revalidate
+  event.respondWith(staleWhileRevalidate(request, DYNAMIC_CACHE));
+});
+
+// Cache First策略
+async function cacheFirst(request, cacheName) {
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(request);
+
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const response = await fetch(request);
+    if (response.status === 200) {
+      cache.put(request, response.clone());
+    }
+    return response;
+  } catch (error) {
+    // 返回离线页面或默认响应
+    if (request.mode === 'navigate') {
+      return cache.match('/offline.html');
+    }
+    throw error;
+  }
+}
+
+// Network First策略
+async function networkFirst(request, cacheName) {
+  const cache = await caches.open(cacheName);
+
+  try {
+    const response = await fetch(request);
+
+    if (response.status === 200) {
+      cache.put(request, response.clone());
+    }
+
+    return response;
+  } catch (error) {
+    const cached = await cache.match(request);
+    if (cached) {
+      return cached;
+    }
+    throw error;
+  }
+}
+
+// Stale While Revalidate策略
+async function staleWhileRevalidate(request, cacheName) {
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(request);
+
+  // 后台更新缓存
+  const fetchPromise = fetch(request)
+    .then(response =&gt; {
+      if (response.status === 200) {
+        cache.put(request, response.clone());
+      }
+      return response;
+    })
+    .catch(() =&gt; cached);
+
+  // 如果有缓存，立即返回，否则等待网络请求
+  return cached || fetchPromise;
+}
+</code></pre>
+<h3>HTTP缓存头优化</h3>
+<pre><code class="language-javascript">// Express.js 缓存中间件
+function createCacheMiddleware() {
+  return (req, res, next) =&gt; {
+    const url = req.url;
+    const method = req.method;
+
+    // 静态资源长期缓存
+    if (url.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$/)) {
+      res.set({
+        'Cache-Control': 'public, max-age=31536000, immutable', // 1年
+        'ETag': generateETag(url),
+        'Vary': 'Accept-Encoding'
+      });
+    }
+
+    // API响应短期缓存
+    else if (url.startsWith('/api/')) {
+      if (method === 'GET') {
+        res.set({
+          'Cache-Control': 'public, max-age=300, s-maxage=600', // 5分钟/10分钟
+          'ETag': generateETag(url + JSON.stringify(req.query)),
+          'Vary': 'Accept-Encoding, Authorization'
+        });
+      } else {
+        res.set({
+          'Cache-Control': 'no-cache, no-store, must-revalidate'
+        });
+      }
+    }
+
+    // HTML页面
+    else {
+      res.set({
+        'Cache-Control': 'public, max-age=0, s-maxage=3600', // CDN缓存1小时
+        'ETag': generateETag(url),
+        'Vary': 'Accept-Encoding, User-Agent'
+      });
+    }
+
+    next();
+  };
+}
+
+function generateETag(content) {
+  const crypto = require('crypto');
+  return crypto.createHash('md5').update(content).digest('hex');
+}
+</code></pre>
+<h2>性能优化结果</h2>
+<h3>优化前后对比</h3>
+<pre><code class="language-javascript">const performanceResults = {
+  Core_Web_Vitals: {
+    LCP: {
+      优化前: &quot;4.2秒&quot;,
+      优化后: &quot;1.8秒&quot;,
+      改善: &quot;57%&quot;
+    },
+    FID: {
+      优化前: &quot;280ms&quot;,
+      优化后: &quot;45ms&quot;,
+      改善: &quot;84%&quot;
+    },
+    CLS: {
+      优化前: &quot;0.28&quot;,
+      优化后: &quot;0.05&quot;,
+      改善: &quot;82%&quot;
+    }
+  },
+
+  加载性能: {
+    首屏时间: {
+      优化前: &quot;2.8秒&quot;,
+      优化后: &quot;1.2秒&quot;,
+      改善: &quot;57%&quot;
+    },
+    完全加载时间: {
+      优化前: &quot;6.5秒&quot;,
+      优化后: &quot;3.1秒&quot;,
+      改善: &quot;52%&quot;
+    },
+    包体积: {
+      优化前: &quot;3.2MB&quot;,
+      优化后: &quot;850KB&quot;,
+      改善: &quot;73%&quot;
+    }
+  },
+
+  用户体验指标: {
+    跳出率: {
+      优化前: &quot;28%&quot;,
+      优化后: &quot;15%&quot;,
+      改善: &quot;46%&quot;
+    },
+    页面停留时间: {
+      优化前: &quot;2.3分钟&quot;,
+      优化后: &quot;4.1分钟&quot;,
+      改善: &quot;78%&quot;
+    },
+    转化率: {
+      优化前: &quot;3.2%&quot;,
+      优化后: &quot;5.8%&quot;,
+      改善: &quot;81%&quot;
+    }
+  }
+};
+</code></pre>
+<h3>业务价值</h3>
+<p>通过这次性能优化，我们不仅提升了技术指标，更重要的是带来了实际的业务价值：</p>
+<ul>
+<li><strong>用户体验显著改善</strong>：加载时间减少一半以上，用户满意度明显提升</li>
+<li><strong>SEO效果提升</strong>：Core Web Vitals的改善直接提升了搜索排名</li>
+<li><strong>转化率增长</strong>：更快的加载速度和更好的交互体验带来了转化率的大幅提升</li>
+<li><strong>运营成本降低</strong>：更小的资源体积减少了CDN费用</li>
+<li><strong>开发效率提升</strong>：更好的构建工具和监控体系提升了开发体验</li>
+</ul>
+<h2>持续监控与优化</h2>
+<p>性能优化不是一次性的工作，而是一个持续的过程。我们建立了完善的监控体系：</p>
+<pre><code class="language-javascript">// 性能监控仪表板
+class PerformanceDashboard {
+  constructor() {
+    this.metrics = new Map();
+    this.alerts = [];
+    this.initDashboard();
+  }
+
+  initDashboard() {
+    this.startRealTimeMonitoring();
+    this.setupAlerts();
+    this.generateReports();
+  }
+
+  startRealTimeMonitoring() {
+    setInterval(() =&gt; {
+      this.collectMetrics();
+    }, 60000); // 每分钟收集一次数据
+  }
+
+  setupAlerts() {
+    const thresholds = {
+      LCP: 2500,
+      FID: 100,
+      CLS: 0.1,
+      errorRate: 0.05
+    };
+
+    Object.entries(thresholds).forEach(([metric, threshold]) =&gt; {
+      this.addAlert(metric, threshold);
+    });
+  }
+
+  addAlert(metric, threshold) {
+    // 当指标超过阈值时发送告警
+    this.alerts.push({
+      metric,
+      threshold,
+      action: (value) =&gt; {
+        if (value &gt; threshold) {
+          this.sendAlert(metric, value, threshold);
+        }
+      }
+    });
+  }
+
+  sendAlert(metric, current, threshold) {
+    // 发送到Slack、邮件等告警渠道
+    console.warn(`Performance Alert: ${metric} is ${current}, threshold is ${threshold}`);
+  }
+}
+
+new PerformanceDashboard();
+</code></pre>
+<p>性能优化是一个综合性的工程，需要从多个维度同时入手。通过系统性的分析、针对性的优化和持续的监控，我们成功地将应用性能提升到了一个新的水平。这不仅是技术上的胜利，更是用户体验和业务价值的双重提升。</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Dive into Database Query Optimization: A Real-World Case Study - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>Deep Dive into Database Query Optimization: A Real-World Case Study</h1>
+                    <p class="article-date">2024年02月28日</p>
+                </div>
+                
+                <div class="article-content">
+                    <hr />
+<p>title: "Deep Dive into Database Query Optimization: A Real-World Case Study"<br />
+date: "2024-02-28"<br />
+tags: ["database", "optimization", "performance", "sql"]</p>
+<hr />
+<h1>Deep Dive into Database Query Optimization: A Real-World Case Study</h1>
+<p>Database performance optimization is one of those skills that separates good developers from great ones. Last month, I was tasked with optimizing a critical query that was causing our application to slow down significantly during peak hours. This is the story of how we identified, analyzed, and solved a complex performance bottleneck.</p>
+<h2>The Problem</h2>
+<p>Our e-commerce platform was experiencing severe performance degradation during peak shopping hours. The main symptom was that product listing pages were taking 8-12 seconds to load, when they should have been loading in under 2 seconds. Customer complaints were pouring in, and our conversion rates were dropping.</p>
+<p>Initial profiling revealed that 90% of the response time was spent on a single database query that aggregated product information, pricing, inventory, and customer reviews. The query looked innocent enough at first glance:</p>
+<pre><code class="language-sql">SELECT 
+    p.id,
+    p.name,
+    p.description,
+    p.image_url,
+    pr.price,
+    pr.discount_price,
+    i.quantity as stock_quantity,
+    AVG(r.rating) as average_rating,
+    COUNT(r.id) as review_count,
+    c.name as category_name
+FROM products p
+LEFT JOIN pricing pr ON p.id = pr.product_id
+LEFT JOIN inventory i ON p.id = i.product_id
+LEFT JOIN reviews r ON p.id = r.product_id
+LEFT JOIN categories c ON p.category_id = c.id
+WHERE p.status = 'active'
+    AND p.category_id IN (1, 2, 3, 4, 5)
+    AND pr.effective_date &lt;= NOW()
+    AND pr.expiry_date &gt;= NOW()
+GROUP BY p.id, p.name, p.description, p.image_url, pr.price, pr.discount_price, i.quantity, c.name
+ORDER BY p.created_at DESC
+LIMIT 20;
+</code></pre>
+<h2>Initial Analysis</h2>
+<p>The first step was to analyze the query execution plan. Using <code>EXPLAIN ANALYZE</code>, we discovered several issues:</p>
+<ol>
+<li><strong>Missing indexes</strong>: The query was performing full table scans on multiple tables</li>
+<li><strong>Inefficient joins</strong>: Some joins were using nested loop joins instead of hash joins</li>
+<li><strong>Expensive aggregations</strong>: The <code>AVG()</code> and <code>COUNT()</code> operations were being performed on large datasets</li>
+<li><strong>Suboptimal WHERE clause</strong>: The category filter wasn't using an index effectively</li>
+</ol>
+<p>The execution plan showed that the query was processing over 2 million rows across all tables, even though we only needed 20 results.</p>
+<h2>Step-by-Step Optimization</h2>
+<h3>Phase 1: Index Optimization</h3>
+<p>The first obvious fix was to add proper indexes. After analyzing the query patterns, we created several composite indexes:</p>
+<pre><code class="language-sql">-- Index for the main product filter
+CREATE INDEX idx_products_status_category_created 
+ON products(status, category_id, created_at DESC);
+
+-- Index for pricing lookups
+CREATE INDEX idx_pricing_product_dates 
+ON pricing(product_id, effective_date, expiry_date);
+
+-- Index for inventory lookups
+CREATE INDEX idx_inventory_product_id 
+ON inventory(product_id);
+
+-- Index for review aggregations
+CREATE INDEX idx_reviews_product_id 
+ON reviews(product_id, rating);
+</code></pre>
+<p>This immediately improved performance by about 40%, reducing query time from 8-12 seconds to 5-7 seconds.</p>
+<h3>Phase 2: Query Restructuring</h3>
+<p>The next step was to restructure the query to minimize the data processed during aggregation. We separated the aggregation logic:</p>
+<pre><code class="language-sql">-- Step 1: Get the base product list first
+WITH base_products AS (
+    SELECT 
+        p.id,
+        p.name,
+        p.description,
+        p.image_url,
+        p.created_at,
+        c.name as category_name
+    FROM products p
+    INNER JOIN categories c ON p.category_id = c.id
+    WHERE p.status = 'active'
+        AND p.category_id IN (1, 2, 3, 4, 5)
+    ORDER BY p.created_at DESC
+    LIMIT 20
+),
+-- Step 2: Get pricing info for selected products
+product_pricing AS (
+    SELECT 
+        bp.id,
+        pr.price,
+        pr.discount_price
+    FROM base_products bp
+    LEFT JOIN pricing pr ON bp.id = pr.product_id
+    WHERE pr.effective_date &lt;= NOW()
+        AND pr.expiry_date &gt;= NOW()
+),
+-- Step 3: Get inventory info for selected products
+product_inventory AS (
+    SELECT 
+        bp.id,
+        i.quantity as stock_quantity
+    FROM base_products bp
+    LEFT JOIN inventory i ON bp.id = i.product_id
+),
+-- Step 4: Get review aggregations for selected products
+product_reviews AS (
+    SELECT 
+        bp.id,
+        AVG(r.rating) as average_rating,
+        COUNT(r.id) as review_count
+    FROM base_products bp
+    LEFT JOIN reviews r ON bp.id = r.product_id
+    GROUP BY bp.id
+)
+-- Step 5: Combine all the data
+SELECT 
+    bp.id,
+    bp.name,
+    bp.description,
+    bp.image_url,
+    bp.category_name,
+    pp.price,
+    pp.discount_price,
+    pi.stock_quantity,
+    COALESCE(pr.average_rating, 0) as average_rating,
+    COALESCE(pr.review_count, 0) as review_count
+FROM base_products bp
+LEFT JOIN product_pricing pp ON bp.id = pp.id
+LEFT JOIN product_inventory pi ON bp.id = pi.id
+LEFT JOIN product_reviews pr ON bp.id = pr.id
+ORDER BY bp.created_at DESC;
+</code></pre>
+<p>This approach reduced the query time to 2-3 seconds by limiting the aggregation to only the 20 products we actually needed.</p>
+<h3>Phase 3: Materialized Views for Heavy Aggregations</h3>
+<p>For the review aggregations, which were still the bottleneck, we implemented a materialized view that was updated periodically:</p>
+<pre><code class="language-sql">-- Create materialized view for review aggregations
+CREATE MATERIALIZED VIEW mv_product_review_stats AS
+SELECT 
+    product_id,
+    AVG(rating) as average_rating,
+    COUNT(id) as review_count,
+    MAX(created_at) as last_review_date
+FROM reviews
+GROUP BY product_id;
+
+-- Create index on the materialized view
+CREATE INDEX idx_mv_product_review_stats_product_id 
+ON mv_product_review_stats(product_id);
+
+-- Set up automated refresh (runs every 15 minutes)
+SELECT cron.schedule('refresh-review-stats', '*/15 * * * *', 
+    'REFRESH MATERIALIZED VIEW mv_product_review_stats;');
+</code></pre>
+<p>Now our main query became much simpler:</p>
+<pre><code class="language-sql">SELECT 
+    p.id,
+    p.name,
+    p.description,
+    p.image_url,
+    pr.price,
+    pr.discount_price,
+    i.quantity as stock_quantity,
+    COALESCE(mrs.average_rating, 0) as average_rating,
+    COALESCE(mrs.review_count, 0) as review_count,
+    c.name as category_name
+FROM products p
+LEFT JOIN pricing pr ON p.id = pr.product_id
+LEFT JOIN inventory i ON p.id = i.product_id
+LEFT JOIN mv_product_review_stats mrs ON p.id = mrs.product_id
+LEFT JOIN categories c ON p.category_id = c.id
+WHERE p.status = 'active'
+    AND p.category_id IN (1, 2, 3, 4, 5)
+    AND pr.effective_date &lt;= NOW()
+    AND pr.expiry_date &gt;= NOW()
+ORDER BY p.created_at DESC
+LIMIT 20;
+</code></pre>
+<h2>Advanced Optimization Techniques</h2>
+<h3>Partitioning Strategy</h3>
+<p>Given that our products table was growing rapidly (over 10 million records), we implemented table partitioning by category:</p>
+<pre><code class="language-sql">-- Create partitioned table
+CREATE TABLE products_partitioned (
+    id SERIAL,
+    name VARCHAR(255),
+    description TEXT,
+    category_id INTEGER,
+    status VARCHAR(20),
+    created_at TIMESTAMP DEFAULT NOW()
+) PARTITION BY RANGE (category_id);
+
+-- Create partitions for different category ranges
+CREATE TABLE products_electronics PARTITION OF products_partitioned 
+FOR VALUES FROM (1) TO (100);
+
+CREATE TABLE products_clothing PARTITION OF products_partitioned 
+FOR VALUES FROM (100) TO (200);
+
+CREATE TABLE products_books PARTITION OF products_partitioned 
+FOR VALUES FROM (200) TO (300);
+</code></pre>
+<p>This further improved query performance by allowing PostgreSQL to skip irrelevant partitions during query execution.</p>
+<h3>Connection Pooling and Caching</h3>
+<p>We also implemented a multi-layer caching strategy:</p>
+<pre><code class="language-javascript">// Application-level caching
+class ProductCacheManager {
+    constructor() {
+        this.redis = new Redis(process.env.REDIS_URL);
+        this.localCache = new Map();
+        this.cacheTimeout = 300; // 5 minutes
+    }
+
+    async getCachedProducts(cacheKey) {
+        // Check local cache first
+        if (this.localCache.has(cacheKey)) {
+            const cached = this.localCache.get(cacheKey);
+            if (Date.now() - cached.timestamp &lt; this.cacheTimeout * 1000) {
+                return cached.data;
+            }
+        }
+
+        // Check Redis cache
+        const redisData = await this.redis.get(cacheKey);
+        if (redisData) {
+            const parsed = JSON.parse(redisData);
+            this.localCache.set(cacheKey, {
+                data: parsed,
+                timestamp: Date.now()
+            });
+            return parsed;
+        }
+
+        return null;
+    }
+
+    async setCachedProducts(cacheKey, data) {
+        // Set in Redis with expiration
+        await this.redis.setex(cacheKey, this.cacheTimeout, JSON.stringify(data));
+
+        // Set in local cache
+        this.localCache.set(cacheKey, {
+            data,
+            timestamp: Date.now()
+        });
+    }
+}
+</code></pre>
+<h3>Query Result Monitoring</h3>
+<p>We implemented continuous monitoring to track query performance:</p>
+<pre><code class="language-javascript">class QueryMonitor {
+    constructor() {
+        this.metrics = {
+            queryTimes: [],
+            slowQueries: [],
+            errorCounts: {}
+        };
+    }
+
+    recordQueryTime(queryName, duration) {
+        this.metrics.queryTimes.push({
+            query: queryName,
+            duration,
+            timestamp: Date.now()
+        });
+
+        // Alert if query is slow
+        if (duration &gt; 1000) {
+            this.alertSlowQuery(queryName, duration);
+        }
+    }
+
+    alertSlowQuery(queryName, duration) {
+        console.warn(`Slow query detected: ${queryName} took ${duration}ms`);
+        // Send alert to monitoring system
+        this.sendAlert({
+            type: 'slow_query',
+            query: queryName,
+            duration: duration,
+            timestamp: Date.now()
+        });
+    }
+
+    getMetrics() {
+        return {
+            averageQueryTime: this.getAverageQueryTime(),
+            slowQueryCount: this.metrics.slowQueries.length,
+            totalQueries: this.metrics.queryTimes.length
+        };
+    }
+}
+</code></pre>
+<h2>Results and Impact</h2>
+<p>After implementing all these optimizations, we achieved remarkable improvements:</p>
+<ul>
+<li><strong>Query time</strong>: Reduced from 8-12 seconds to 200-500ms (95% improvement)</li>
+<li><strong>Throughput</strong>: Increased from 50 requests/second to 300 requests/second</li>
+<li><strong>CPU usage</strong>: Reduced database CPU usage by 60%</li>
+<li><strong>Customer satisfaction</strong>: Page load times improved dramatically, leading to 25% increase in conversion rates</li>
+</ul>
+<p>The optimization techniques we used included leveraging spatiotemporal modeling principles to better understand data access patterns, implementing lightweight engines for specific query types, and integrating multi-modal data from different sources efficiently.</p>
+<h2>Key Lessons Learned</h2>
+<ol>
+<li>
+<p><strong>Measure first</strong>: Always profile before optimizing. Don't guess where the bottleneck is.</p>
+</li>
+<li>
+<p><strong>Index strategically</strong>: Don't just add indexes everywhere. Analyze query patterns and create composite indexes that support multiple queries.</p>
+</li>
+<li>
+<p><strong>Limit early</strong>: Try to reduce the dataset as early as possible in the query execution.</p>
+</li>
+<li>
+<p><strong>Cache intelligently</strong>: Implement multi-layer caching with appropriate TTLs.</p>
+</li>
+<li>
+<p><strong>Monitor continuously</strong>: Set up alerts for query performance degradation.</p>
+</li>
+<li>
+<p><strong>Consider materialized views</strong>: For expensive aggregations that don't need real-time updates.</p>
+</li>
+</ol>
+<h2>Future Improvements</h2>
+<p>Looking ahead, we're planning several additional optimizations:</p>
+<ol>
+<li><strong>Read replicas</strong>: Distribute read load across multiple database instances</li>
+<li><strong>Query result compression</strong>: Reduce network overhead for large result sets</li>
+<li><strong>Predictive caching</strong>: Use machine learning to predict which products will be requested</li>
+<li><strong>Real-time analytics</strong>: Implement streaming analytics for real-time review aggregations</li>
+</ol>
+<h2>Conclusion</h2>
+<p>Database optimization is both an art and a science. It requires deep understanding of your data patterns, query execution plans, and system resources. The key is to take a systematic approach: measure, analyze, optimize, and monitor. </p>
+<p>In our case, what started as a 12-second query nightmare became a 300ms success story. The techniques we applied - strategic indexing, query restructuring, materialized views, and intelligent caching - can be applied to many similar scenarios.</p>
+<p>Remember, there's no one-size-fits-all solution. Every system has its unique characteristics, and optimization strategies should be tailored accordingly. The important thing is to never stop monitoring and improving, because performance optimization is an ongoing journey, not a one-time destination.</p>
+<p>The impact of these optimizations extended far beyond just query performance. It improved our entire application's responsiveness, increased customer satisfaction, and ultimately contributed to significant business growth. It's a perfect example of how technical excellence directly translates to business value.</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

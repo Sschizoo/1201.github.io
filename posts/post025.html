@@ -1,0 +1,1794 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微服务架构设计实战：从单体到分布式的演进路径 - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>微服务架构设计实战：从单体到分布式的演进路径</h1>
+                    <p class="article-date">2025年07月03日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p><strong>Date: July 12, 2024</strong></p>
+<p>最近参与了公司一个大型单体应用向微服务架构的迁移项目，这个过程让我对微服务架构有了更深入的理解。从架构设计、服务拆分、到部署运维，每个环节都有很多值得分享的经验和踩过的坑。</p>
+<h2>微服务架构设计原则</h2>
+<h3>单一职责与服务边界</h3>
+<p>微服务架构的核心是合理的服务边界划分。我们使用领域驱动设计(DDD)来指导服务拆分：</p>
+<pre><code class="language-javascript">// 用户服务 - 负责用户身份认证和基本信息管理
+class UserService {
+    constructor(userRepository, authProvider, eventBus) {
+        this.userRepository = userRepository;
+        this.authProvider = authProvider;
+        this.eventBus = eventBus;
+    }
+
+    async createUser(userData) {
+        // 验证用户数据
+        const validationResult = this.validateUserData(userData);
+        if (!validationResult.isValid) {
+            throw new ValidationError(validationResult.errors);
+        }
+
+        // 检查用户是否已存在
+        const existingUser = await this.userRepository.findByEmail(userData.email);
+        if (existingUser) {
+            throw new ConflictError('User already exists');
+        }
+
+        // 创建用户
+        const hashedPassword = await this.authProvider.hashPassword(userData.password);
+        const user = await this.userRepository.create({
+            ...userData,
+            password: hashedPassword,
+            createdAt: new Date(),
+            status: 'active'
+        });
+
+        // 发布用户创建事件
+        await this.eventBus.publish('user.created', {
+            userId: user.id,
+            email: user.email,
+            profile: {
+                firstName: user.firstName,
+                lastName: user.lastName
+            }
+        });
+
+        return this.sanitizeUser(user);
+    }
+
+    async authenticateUser(email, password) {
+        const user = await this.userRepository.findByEmail(email);
+        if (!user) {
+            throw new AuthenticationError('Invalid credentials');
+        }
+
+        const isPasswordValid = await this.authProvider.verifyPassword(
+            password, 
+            user.password
+        );
+
+        if (!isPasswordValid) {
+            throw new AuthenticationError('Invalid credentials');
+        }
+
+        // 生成JWT token
+        const token = await this.authProvider.generateToken({
+            userId: user.id,
+            email: user.email,
+            roles: user.roles
+        });
+
+        // 记录登录事件
+        await this.eventBus.publish('user.logged_in', {
+            userId: user.id,
+            timestamp: new Date(),
+            ip: this.getClientIP()
+        });
+
+        return {
+            user: this.sanitizeUser(user),
+            token
+        };
+    }
+
+    sanitizeUser(user) {
+        const { password, ...sanitizedUser } = user;
+        return sanitizedUser;
+    }
+}
+
+// 订单服务 - 负责订单生命周期管理
+class OrderService {
+    constructor(orderRepository, inventoryService, paymentService, eventBus) {
+        this.orderRepository = orderRepository;
+        this.inventoryService = inventoryService;
+        this.paymentService = paymentService;
+        this.eventBus = eventBus;
+        this.setupEventHandlers();
+    }
+
+    async createOrder(orderData) {
+        // 开始分布式事务
+        const sagaId = `saga_${Date.now()}_${Math.random()}`;
+
+        try {
+            // 1. 验证订单数据
+            await this.validateOrder(orderData);
+
+            // 2. 检查库存
+            const inventoryResult = await this.inventoryService.reserveItems(
+                orderData.items, 
+                sagaId
+            );
+
+            if (!inventoryResult.success) {
+                throw new InsufficientInventoryError(inventoryResult.unavailableItems);
+            }
+
+            // 3. 创建订单记录
+            const order = await this.orderRepository.create({
+                ...orderData,
+                status: 'pending',
+                sagaId,
+                createdAt: new Date()
+            });
+
+            // 4. 处理支付
+            const paymentResult = await this.paymentService.processPayment({
+                orderId: order.id,
+                amount: order.totalAmount,
+                paymentMethod: orderData.paymentMethod,
+                sagaId
+            });
+
+            if (!paymentResult.success) {
+                // 补偿：释放库存
+                await this.inventoryService.releaseReservation(sagaId);
+                throw new PaymentError(paymentResult.error);
+            }
+
+            // 5. 确认订单
+            const confirmedOrder = await this.orderRepository.update(order.id, {
+                status: 'confirmed',
+                paymentId: paymentResult.paymentId,
+                confirmedAt: new Date()
+            });
+
+            // 6. 发布订单确认事件
+            await this.eventBus.publish('order.confirmed', {
+                orderId: confirmedOrder.id,
+                userId: confirmedOrder.userId,
+                items: confirmedOrder.items,
+                totalAmount: confirmedOrder.totalAmount
+            });
+
+            return confirmedOrder;
+
+        } catch (error) {
+            // 补偿逻辑
+            await this.compensateFailedOrder(sagaId, error);
+            throw error;
+        }
+    }
+
+    async compensateFailedOrder(sagaId, originalError) {
+        try {
+            // 释放库存预留
+            await this.inventoryService.releaseReservation(sagaId);
+
+            // 如果支付已处理，进行退款
+            const paymentInfo = await this.paymentService.getPaymentBySagaId(sagaId);
+            if (paymentInfo &amp;&amp; paymentInfo.status === 'completed') {
+                await this.paymentService.refund(paymentInfo.id, 'Order creation failed');
+            }
+
+            // 记录补偿日志
+            console.log(`Compensation completed for saga ${sagaId}`, {
+                originalError: originalError.message,
+                compensationActions: ['inventory_released', 'payment_refunded']
+            });
+
+        } catch (compensationError) {
+            // 补偿失败，需要人工介入
+            console.error(`Compensation failed for saga ${sagaId}`, {
+                originalError: originalError.message,
+                compensationError: compensationError.message
+            });
+
+            // 发送告警
+            await this.eventBus.publish('system.compensation_failed', {
+                sagaId,
+                originalError: originalError.message,
+                compensationError: compensationError.message,
+                requiresManualIntervention: true
+            });
+        }
+    }
+
+    setupEventHandlers() {
+        // 监听用户创建事件，初始化用户订单相关数据
+        this.eventBus.subscribe('user.created', async (event) =&gt; {
+            await this.initializeUserOrderData(event.userId);
+        });
+
+        // 监听库存变化事件
+        this.eventBus.subscribe('inventory.updated', async (event) =&gt; {
+            await this.handleInventoryUpdate(event);
+        });
+    }
+}
+
+// 库存服务 - 负责商品库存管理
+class InventoryService {
+    constructor(inventoryRepository, eventBus) {
+        this.inventoryRepository = inventoryRepository;
+        this.eventBus = eventBus;
+        this.reservations = new Map(); // 临时预留
+    }
+
+    async reserveItems(items, sagaId) {
+        const unavailableItems = [];
+        const reservedItems = [];
+
+        try {
+            for (const item of items) {
+                const inventory = await this.inventoryRepository.findByProductId(item.productId);
+
+                if (!inventory || inventory.availableQuantity &lt; item.quantity) {
+                    unavailableItems.push({
+                        productId: item.productId,
+                        requestedQuantity: item.quantity,
+                        availableQuantity: inventory?.availableQuantity || 0
+                    });
+                } else {
+                    // 创建预留记录
+                    const reservation = {
+                        sagaId,
+                        productId: item.productId,
+                        quantity: item.quantity,
+                        timestamp: new Date(),
+                        expiresAt: new Date(Date.now() + 30 * 60 * 1000) // 30分钟过期
+                    };
+
+                    this.reservations.set(sagaId, reservation);
+
+                    // 减少可用库存
+                    await this.inventoryRepository.updateAvailableQuantity(
+                        item.productId,
+                        -item.quantity
+                    );
+
+                    reservedItems.push(item);
+                }
+            }
+
+            if (unavailableItems.length &gt; 0) {
+                // 回滚已预留的物品
+                for (const item of reservedItems) {
+                    await this.inventoryRepository.updateAvailableQuantity(
+                        item.productId,
+                        item.quantity
+                    );
+                }
+                this.reservations.delete(sagaId);
+
+                return {
+                    success: false,
+                    unavailableItems
+                };
+            }
+
+            return {
+                success: true,
+                reservedItems
+            };
+
+        } catch (error) {
+            // 发生错误时回滚
+            for (const item of reservedItems) {
+                await this.inventoryRepository.updateAvailableQuantity(
+                    item.productId,
+                    item.quantity
+                );
+            }
+            this.reservations.delete(sagaId);
+
+            throw error;
+        }
+    }
+
+    async releaseReservation(sagaId) {
+        const reservation = this.reservations.get(sagaId);
+
+        if (reservation) {
+            // 恢复库存
+            await this.inventoryRepository.updateAvailableQuantity(
+                reservation.productId,
+                reservation.quantity
+            );
+
+            this.reservations.delete(sagaId);
+
+            await this.eventBus.publish('inventory.reservation_released', {
+                sagaId,
+                productId: reservation.productId,
+                quantity: reservation.quantity
+            });
+        }
+    }
+
+    // 定期清理过期预留
+    async cleanupExpiredReservations() {
+        const now = new Date();
+
+        for (const [sagaId, reservation] of this.reservations.entries()) {
+            if (reservation.expiresAt &lt; now) {
+                await this.releaseReservation(sagaId);
+                console.log(`Released expired reservation for saga ${sagaId}`);
+            }
+        }
+    }
+}
+</code></pre>
+<h3>服务间通信模式</h3>
+<p>在微服务架构中，服务间通信是关键。我们采用了多种通信模式：</p>
+<pre><code class="language-javascript">// 同步通信 - REST API
+class APIGateway {
+    constructor() {
+        this.services = new Map();
+        this.circuitBreakers = new Map();
+        this.rateLimiters = new Map();
+        this.setupRoutes();
+    }
+
+    registerService(name, baseUrl, options = {}) {
+        this.services.set(name, {
+            baseUrl,
+            healthCheckPath: options.healthCheckPath || '/health',
+            timeout: options.timeout || 5000,
+            retries: options.retries || 3
+        });
+
+        // 为每个服务创建熔断器
+        this.circuitBreakers.set(name, new CircuitBreaker(options.circuitBreaker));
+
+        // 创建限流器
+        this.rateLimiters.set(name, new RateLimiter(options.rateLimit));
+    }
+
+    async proxyRequest(serviceName, path, options = {}) {
+        const service = this.services.get(serviceName);
+        if (!service) {
+            throw new Error(`Service ${serviceName} not found`);
+        }
+
+        // 检查限流
+        const rateLimiter = this.rateLimiters.get(serviceName);
+        if (!rateLimiter.allow()) {
+            throw new RateLimitError(`Rate limit exceeded for ${serviceName}`);
+        }
+
+        // 通过熔断器执行请求
+        const circuitBreaker = this.circuitBreakers.get(serviceName);
+        return circuitBreaker.execute(async () =&gt; {
+            return this.makeRequest(service, path, options);
+        });
+    }
+
+    async makeRequest(service, path, options) {
+        const url = `${service.baseUrl}${path}`;
+        const requestOptions = {
+            timeout: service.timeout,
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Request-ID': this.generateRequestId(),
+                ...options.headers
+            }
+        };
+
+        let lastError;
+
+        for (let attempt = 1; attempt &lt;= service.retries; attempt++) {
+            try {
+                const response = await fetch(url, requestOptions);
+
+                if (!response.ok) {
+                    throw new HTTPError(response.status, response.statusText);
+                }
+
+                return await response.json();
+
+            } catch (error) {
+                lastError = error;
+
+                if (attempt &lt; service.retries &amp;&amp; this.isRetryableError(error)) {
+                    // 指数退避
+                    const delay = Math.pow(2, attempt) * 1000;
+                    await new Promise(resolve =&gt; setTimeout(resolve, delay));
+                } else {
+                    break;
+                }
+            }
+        }
+
+        throw lastError;
+    }
+
+    setupRoutes() {
+        // 用户相关路由
+        this.addRoute('GET', '/api/users/:id', 'user-service', '/users/:id');
+        this.addRoute('POST', '/api/users', 'user-service', '/users');
+        this.addRoute('PUT', '/api/users/:id', 'user-service', '/users/:id');
+
+        // 订单相关路由
+        this.addRoute('GET', '/api/orders', 'order-service', '/orders');
+        this.addRoute('POST', '/api/orders', 'order-service', '/orders');
+        this.addRoute('GET', '/api/orders/:id', 'order-service', '/orders/:id');
+
+        // 库存相关路由
+        this.addRoute('GET', '/api/inventory/:productId', 'inventory-service', '/inventory/:productId');
+        this.addRoute('PUT', '/api/inventory/:productId', 'inventory-service', '/inventory/:productId');
+    }
+
+    addRoute(method, path, serviceName, servicePath) {
+        // 路由注册逻辑
+        console.log(`Registered route: ${method} ${path} -&gt; ${serviceName}${servicePath}`);
+    }
+}
+
+// 熔断器实现
+class CircuitBreaker {
+    constructor(options = {}) {
+        this.failureThreshold = options.failureThreshold || 5;
+        this.recoveryTimeout = options.recoveryTimeout || 60000;
+        this.monitoringPeriod = options.monitoringPeriod || 10000;
+
+        this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+        this.failureCount = 0;
+        this.lastFailureTime = null;
+        this.requestCount = 0;
+        this.successCount = 0;
+
+        this.resetStatistics();
+    }
+
+    async execute(fn) {
+        if (this.state === 'OPEN') {
+            if (Date.now() - this.lastFailureTime &gt;= this.recoveryTimeout) {
+                this.state = 'HALF_OPEN';
+                console.log('Circuit breaker moved to HALF_OPEN state');
+            } else {
+                throw new CircuitBreakerOpenError('Circuit breaker is OPEN');
+            }
+        }
+
+        try {
+            const result = await fn();
+            this.onSuccess();
+            return result;
+        } catch (error) {
+            this.onFailure();
+            throw error;
+        }
+    }
+
+    onSuccess() {
+        this.successCount++;
+
+        if (this.state === 'HALF_OPEN') {
+            // 在半开状态下成功，关闭熔断器
+            this.state = 'CLOSED';
+            this.resetStatistics();
+            console.log('Circuit breaker moved to CLOSED state');
+        }
+    }
+
+    onFailure() {
+        this.failureCount++;
+        this.lastFailureTime = Date.now();
+
+        if (this.failureCount &gt;= this.failureThreshold) {
+            this.state = 'OPEN';
+            console.log('Circuit breaker moved to OPEN state');
+        }
+    }
+
+    resetStatistics() {
+        this.failureCount = 0;
+        this.requestCount = 0;
+        this.successCount = 0;
+        this.lastFailureTime = null;
+
+        // 定期重置统计信息
+        setTimeout(() =&gt; {
+            if (this.state === 'CLOSED') {
+                this.resetStatistics();
+            }
+        }, this.monitoringPeriod);
+    }
+}
+
+// 异步通信 - 事件驱动
+class EventBus {
+    constructor(options = {}) {
+        this.subscribers = new Map();
+        this.deadLetterQueue = [];
+        this.retryAttempts = options.retryAttempts || 3;
+        this.retryDelay = options.retryDelay || 1000;
+    }
+
+    subscribe(eventType, handler, options = {}) {
+        if (!this.subscribers.has(eventType)) {
+            this.subscribers.set(eventType, []);
+        }
+
+        const subscription = {
+            handler,
+            options: {
+                retry: options.retry !== false,
+                deadLetter: options.deadLetter !== false,
+                ...options
+            }
+        };
+
+        this.subscribers.get(eventType).push(subscription);
+
+        return () =&gt; {
+            const handlers = this.subscribers.get(eventType);
+            const index = handlers.indexOf(subscription);
+            if (index &gt; -1) {
+                handlers.splice(index, 1);
+            }
+        };
+    }
+
+    async publish(eventType, data) {
+        const event = {
+            id: this.generateEventId(),
+            type: eventType,
+            data,
+            timestamp: new Date().toISOString(),
+            metadata: {
+                source: 'application',
+                version: '1.0'
+            }
+        };
+
+        const handlers = this.subscribers.get(eventType) || [];
+
+        const promises = handlers.map(subscription =&gt; 
+            this.executeHandler(subscription, event)
+        );
+
+        await Promise.allSettled(promises);
+    }
+
+    async executeHandler(subscription, event) {
+        const { handler, options } = subscription;
+        let attempt = 0;
+
+        while (attempt &lt;= this.retryAttempts) {
+            try {
+                await handler(event.data, event);
+                return; // 成功执行
+            } catch (error) {
+                attempt++;
+
+                console.error(`Handler failed for event ${event.type}:`, error);
+
+                if (attempt &lt;= this.retryAttempts &amp;&amp; options.retry) {
+                    console.log(`Retrying handler for event ${event.type}, attempt ${attempt}`);
+                    await new Promise(resolve =&gt; 
+                        setTimeout(resolve, this.retryDelay * attempt)
+                    );
+                } else {
+                    // 最终失败，放入死信队列
+                    if (options.deadLetter) {
+                        this.deadLetterQueue.push({
+                            event,
+                            handler: handler.toString(),
+                            error: error.message,
+                            attempts: attempt,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    generateEventId() {
+        return `evt_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    getDeadLetterQueue() {
+        return [...this.deadLetterQueue];
+    }
+
+    clearDeadLetterQueue() {
+        this.deadLetterQueue.length = 0;
+    }
+}
+</code></pre>
+<h2>数据管理与一致性</h2>
+
+系统应支持对对象在几何形态、属性特征和行为轨迹上的多维建模能力，涵盖高维几何表达(如三维+时间+状态)、属性演化链条和对象间的动态拓扑关系。模型应可在时序维度上记录每一阶段的状态信息，实现从静态结构到行为链条的连续演化建模，支持实时更新与多维视图切换。
+
+面对能源行业数据量大、更新频繁、来源多样的特性，需构建高效的数据集成与存储系统。系统应支持对遥感影像、传感器流、业务数据等多源异构数据进行标准化处理与语义对齐，并基于分布式文件系统(如HDS)与高效数据索引技术(如R树、QuadTree)构建优化的数据访问机制，提升检索性能、存储效率与并发能力。
+
+GIMPro模型不仅承载基础的资产表达与管理功能，还需面向多维复杂场景具备高弹性、高保真、高适配性的时空表达能力。本模块围绕高维数据建模、多场景适应性与智能化建模管理三大核心能力，提出相应的技术需求框架，为系统在广域应用和复杂业务耦合下的持续运行与智能分析提供技术支撑。项目目标、项目建设范围及项目需求及特点如下：
+
+<h3>数据库per-service模式</h3>
+<p>每个微服务都有自己独立的数据库，避免数据耦合：</p>
+<pre><code class="language-javascript">// 用户服务数据层
+class UserRepository {
+    constructor(database) {
+        this.db = database;
+        this.tableName = 'users';
+    }
+
+    async create(userData) {
+        const query = `
+            INSERT INTO ${this.tableName} 
+            (id, email, password, first_name, last_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        const id = this.generateId();
+        const now = new Date();
+
+        await this.db.execute(query, [
+            id,
+            userData.email,
+            userData.password,
+            userData.firstName,
+            userData.lastName,
+            now,
+            now
+        ]);
+
+        return this.findById(id);
+    }
+
+    async findById(id) {
+        const query = `SELECT * FROM ${this.tableName} WHERE id = ?`;
+        const [rows] = await this.db.execute(query, [id]);
+
+        return rows[0] ? this.mapRowToUser(rows[0]) : null;
+    }
+
+    async findByEmail(email) {
+        const query = `SELECT * FROM ${this.tableName} WHERE email = ?`;
+        const [rows] = await this.db.execute(query, [email]);
+
+        return rows[0] ? this.mapRowToUser(rows[0]) : null;
+    }
+
+    async update(id, updates) {
+        const setClause = Object.keys(updates)
+            .map(key =&gt; `${this.camelToSnake(key)} = ?`)
+            .join(', ');
+
+        const query = `
+            UPDATE ${this.tableName} 
+            SET ${setClause}, updated_at = ? 
+            WHERE id = ?
+        `;
+
+        const values = [
+            ...Object.values(updates),
+            new Date(),
+            id
+        ];
+
+        await this.db.execute(query, values);
+        return this.findById(id);
+    }
+
+    mapRowToUser(row) {
+        return {
+            id: row.id,
+            email: row.email,
+            password: row.password,
+            firstName: row.first_name,
+            lastName: row.last_name,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at
+        };
+    }
+
+    camelToSnake(str) {
+        return str.replace(/[A-Z]/g, letter =&gt; `_${letter.toLowerCase()}`);
+    }
+
+    generateId() {
+        return `usr_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+}
+
+// 订单服务数据层
+class OrderRepository {
+    constructor(database) {
+        this.db = database;
+        this.orderTable = 'orders';
+        this.orderItemsTable = 'order_items';
+    }
+
+    async create(orderData) {
+        const connection = await this.db.getConnection();
+
+        try {
+            await connection.beginTransaction();
+
+            // 插入订单主记录
+            const orderId = this.generateId();
+            const orderQuery = `
+                INSERT INTO ${this.orderTable}
+                (id, user_id, status, total_amount, saga_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `;
+
+            const now = new Date();
+            await connection.execute(orderQuery, [
+                orderId,
+                orderData.userId,
+                orderData.status,
+                orderData.totalAmount,
+                orderData.sagaId,
+                now,
+                now
+            ]);
+
+            // 插入订单项
+            const itemQuery = `
+                INSERT INTO ${this.orderItemsTable}
+                (id, order_id, product_id, quantity, unit_price, total_price)
+                VALUES (?, ?, ?, ?, ?, ?)
+            `;
+
+            for (const item of orderData.items) {
+                await connection.execute(itemQuery, [
+                    this.generateId(),
+                    orderId,
+                    item.productId,
+                    item.quantity,
+                    item.unitPrice,
+                    item.quantity * item.unitPrice
+                ]);
+            }
+
+            await connection.commit();
+            return this.findById(orderId);
+
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
+    }
+
+    async findById(id) {
+        const orderQuery = `
+            SELECT o.*, 
+                   oi.id as item_id,
+                   oi.product_id,
+                   oi.quantity,
+                   oi.unit_price,
+                   oi.total_price
+            FROM ${this.orderTable} o
+            LEFT JOIN ${this.orderItemsTable} oi ON o.id = oi.order_id
+            WHERE o.id = ?
+        `;
+
+        const [rows] = await this.db.execute(orderQuery, [id]);
+
+        if (rows.length === 0) {
+            return null;
+        }
+
+        return this.mapRowsToOrder(rows);
+    }
+
+    async findByUserId(userId, options = {}) {
+        const { limit = 20, offset = 0, status } = options;
+
+        let query = `
+            SELECT o.*, 
+                   oi.id as item_id,
+                   oi.product_id,
+                   oi.quantity,
+                   oi.unit_price,
+                   oi.total_price
+            FROM ${this.orderTable} o
+            LEFT JOIN ${this.orderItemsTable} oi ON o.id = oi.order_id
+            WHERE o.user_id = ?
+        `;
+
+        const params = [userId];
+
+        if (status) {
+            query += ' AND o.status = ?';
+            params.push(status);
+        }
+
+        query += ' ORDER BY o.created_at DESC LIMIT ? OFFSET ?';
+        params.push(limit, offset);
+
+        const [rows] = await this.db.execute(query, params);
+
+        return this.groupRowsByOrder(rows);
+    }
+
+    mapRowsToOrder(rows) {
+        const orderData = {
+            id: rows[0].id,
+            userId: rows[0].user_id,
+            status: rows[0].status,
+            totalAmount: rows[0].total_amount,
+            sagaId: rows[0].saga_id,
+            createdAt: rows[0].created_at,
+            updatedAt: rows[0].updated_at,
+            items: []
+        };
+
+        for (const row of rows) {
+            if (row.item_id) {
+                orderData.items.push({
+                    id: row.item_id,
+                    productId: row.product_id,
+                    quantity: row.quantity,
+                    unitPrice: row.unit_price,
+                    totalPrice: row.total_price
+                });
+            }
+        }
+
+        return orderData;
+    }
+
+    groupRowsByOrder(rows) {
+        const ordersMap = new Map();
+
+        for (const row of rows) {
+            if (!ordersMap.has(row.id)) {
+                ordersMap.set(row.id, {
+                    id: row.id,
+                    userId: row.user_id,
+                    status: row.status,
+                    totalAmount: row.total_amount,
+                    sagaId: row.saga_id,
+                    createdAt: row.created_at,
+                    updatedAt: row.updated_at,
+                    items: []
+                });
+            }
+
+            if (row.item_id) {
+                ordersMap.get(row.id).items.push({
+                    id: row.item_id,
+                    productId: row.product_id,
+                    quantity: row.quantity,
+                    unitPrice: row.unit_price,
+                    totalPrice: row.total_price
+                });
+            }
+        }
+
+        return Array.from(ordersMap.values());
+    }
+}
+</code></pre>
+<h3>分布式事务处理(Saga模式)</h3>
+<p>为了保证跨服务的数据一致性，我们实现了Saga模式：</p>
+<pre><code class="language-javascript">// Saga协调器
+class SagaOrchestrator {
+    constructor(eventBus) {
+        this.eventBus = eventBus;
+        this.sagaDefinitions = new Map();
+        this.sagaInstances = new Map();
+        this.setupEventHandlers();
+    }
+
+    defineSaga(sagaType, definition) {
+        this.sagaDefinitions.set(sagaType, definition);
+    }
+
+    async startSaga(sagaType, sagaData) {
+        const definition = this.sagaDefinitions.get(sagaType);
+        if (!definition) {
+            throw new Error(`Saga type ${sagaType} not found`);
+        }
+
+        const sagaId = this.generateSagaId();
+        const sagaInstance = {
+            id: sagaId,
+            type: sagaType,
+            data: sagaData,
+            currentStep: 0,
+            status: 'running',
+            steps: definition.steps,
+            compensations: [],
+            startedAt: new Date(),
+            updatedAt: new Date()
+        };
+
+        this.sagaInstances.set(sagaId, sagaInstance);
+
+        // 执行第一步
+        await this.executeNextStep(sagaInstance);
+
+        return sagaId;
+    }
+
+    async executeNextStep(sagaInstance) {
+        const { steps, currentStep } = sagaInstance;
+
+        if (currentStep &gt;= steps.length) {
+            // Saga完成
+            await this.completeSaga(sagaInstance);
+            return;
+        }
+
+        const step = steps[currentStep];
+
+        try {
+            console.log(`Executing step ${currentStep + 1}/${steps.length} for saga ${sagaInstance.id}: ${step.name}`);
+
+            // 执行步骤
+            await this.executeStep(sagaInstance, step);
+
+            // 记录补偿信息
+            if (step.compensation) {
+                sagaInstance.compensations.unshift({
+                    stepIndex: currentStep,
+                    compensationAction: step.compensation,
+                    stepData: sagaInstance.data
+                });
+            }
+
+            // 移动到下一步
+            sagaInstance.currentStep++;
+            sagaInstance.updatedAt = new Date();
+
+            // 继续执行下一步
+            await this.executeNextStep(sagaInstance);
+
+        } catch (error) {
+            console.error(`Step ${currentStep + 1} failed for saga ${sagaInstance.id}:`, error);
+
+            // 执行补偿
+            await this.compensateSaga(sagaInstance, error);
+        }
+    }
+
+    async executeStep(sagaInstance, step) {
+        const { action, service, timeout = 30000 } = step;
+
+        return new Promise((resolve, reject) =&gt; {
+            const timeoutId = setTimeout(() =&gt; {
+                reject(new Error(`Step timeout: ${step.name}`));
+            }, timeout);
+
+            // 发布步骤执行事件
+            this.eventBus.publish(`saga.step.${action}`, {
+                sagaId: sagaInstance.id,
+                stepName: step.name,
+                data: sagaInstance.data
+            }).then(() =&gt; {
+                clearTimeout(timeoutId);
+                resolve();
+            }).catch((error) =&gt; {
+                clearTimeout(timeoutId);
+                reject(error);
+            });
+        });
+    }
+
+    async compensateSaga(sagaInstance, originalError) {
+        console.log(`Starting compensation for saga ${sagaInstance.id}`);
+
+        sagaInstance.status = 'compensating';
+        sagaInstance.error = originalError.message;
+
+        for (const compensation of sagaInstance.compensations) {
+            try {
+                console.log(`Executing compensation for step ${compensation.stepIndex + 1}`);
+
+                await this.eventBus.publish(`saga.compensation.${compensation.compensationAction}`, {
+                    sagaId: sagaInstance.id,
+                    stepIndex: compensation.stepIndex,
+                    data: compensation.stepData
+                });
+
+            } catch (compensationError) {
+                console.error(`Compensation failed for step ${compensation.stepIndex + 1}:`, compensationError);
+
+                // 补偿失败，标记为需要人工干预
+                sagaInstance.status = 'failed';
+                sagaInstance.compensationError = compensationError.message;
+
+                await this.eventBus.publish('saga.compensation.failed', {
+                    sagaId: sagaInstance.id,
+                    originalError: originalError.message,
+                    compensationError: compensationError.message
+                });
+
+                return;
+            }
+        }
+
+        sagaInstance.status = 'compensated';
+        sagaInstance.completedAt = new Date();
+
+        await this.eventBus.publish('saga.compensated', {
+            sagaId: sagaInstance.id,
+            originalError: originalError.message
+        });
+    }
+
+    async completeSaga(sagaInstance) {
+        sagaInstance.status = 'completed';
+        sagaInstance.completedAt = new Date();
+
+        await this.eventBus.publish('saga.completed', {
+            sagaId: sagaInstance.id,
+            type: sagaInstance.type,
+            duration: sagaInstance.completedAt - sagaInstance.startedAt
+        });
+
+        console.log(`Saga ${sagaInstance.id} completed successfully`);
+    }
+
+    setupEventHandlers() {
+        // 监听步骤完成事件
+        this.eventBus.subscribe('step.completed', (data) =&gt; {
+            const sagaInstance = this.sagaInstances.get(data.sagaId);
+            if (sagaInstance &amp;&amp; sagaInstance.status === 'running') {
+                // 步骤完成，继续下一步
+                this.executeNextStep(sagaInstance);
+            }
+        });
+
+        // 监听步骤失败事件
+        this.eventBus.subscribe('step.failed', (data) =&gt; {
+            const sagaInstance = this.sagaInstances.get(data.sagaId);
+            if (sagaInstance &amp;&amp; sagaInstance.status === 'running') {
+                this.compensateSaga(sagaInstance, new Error(data.error));
+            }
+        });
+    }
+
+    generateSagaId() {
+        return `saga_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    getSagaStatus(sagaId) {
+        const sagaInstance = this.sagaInstances.get(sagaId);
+        return sagaInstance ? {
+            id: sagaInstance.id,
+            type: sagaInstance.type,
+            status: sagaInstance.status,
+            currentStep: sagaInstance.currentStep,
+            totalSteps: sagaInstance.steps.length,
+            startedAt: sagaInstance.startedAt,
+            updatedAt: sagaInstance.updatedAt,
+            completedAt: sagaInstance.completedAt,
+            error: sagaInstance.error
+        } : null;
+    }
+}
+
+// 订单处理Saga定义
+const orderProcessingSaga = {
+    steps: [
+        {
+            name: 'Reserve Inventory',
+            action: 'reserve_inventory',
+            service: 'inventory-service',
+            compensation: 'release_inventory',
+            timeout: 10000
+        },
+        {
+            name: 'Process Payment',
+            action: 'process_payment',
+            service: 'payment-service',
+            compensation: 'refund_payment',
+            timeout: 15000
+        },
+        {
+            name: 'Create Order',
+            action: 'create_order',
+            service: 'order-service',
+            compensation: 'cancel_order',
+            timeout: 5000
+        },
+        {
+            name: 'Send Confirmation',
+            action: 'send_confirmation',
+            service: 'notification-service',
+            timeout: 5000
+        }
+    ]
+};
+
+// 使用示例
+const eventBus = new EventBus();
+const sagaOrchestrator = new SagaOrchestrator(eventBus);
+
+// 注册Saga定义
+sagaOrchestrator.defineSaga('order-processing', orderProcessingSaga);
+
+// 启动订单处理Saga
+const orderData = {
+    userId: 'user123',
+    items: [
+        { productId: 'prod1', quantity: 2, unitPrice: 29.99 },
+        { productId: 'prod2', quantity: 1, unitPrice: 49.99 }
+    ],
+    paymentMethod: 'credit_card',
+    totalAmount: 109.97
+};
+
+sagaOrchestrator.startSaga('order-processing', orderData)
+    .then(sagaId =&gt; {
+        console.log(`Order processing saga started: ${sagaId}`);
+
+        // 监控Saga状态
+        const checkStatus = () =&gt; {
+            const status = sagaOrchestrator.getSagaStatus(sagaId);
+            console.log('Saga status:', status);
+
+            if (status &amp;&amp; ['completed', 'compensated', 'failed'].includes(status.status)) {
+                clearInterval(statusInterval);
+            }
+        };
+
+        const statusInterval = setInterval(checkStatus, 1000);
+    })
+    .catch(error =&gt; {
+        console.error('Failed to start saga:', error);
+    });
+</code></pre>
+<h2>服务发现与负载均衡</h2>
+<pre><code class="language-javascript">// 服务注册中心
+class ServiceRegistry {
+    constructor() {
+        this.services = new Map();
+        this.healthCheckers = new Map();
+        this.heartbeatInterval = 30000; // 30秒
+        this.healthCheckInterval = 10000; // 10秒
+
+        this.startHealthChecking();
+    }
+
+    register(serviceName, instance) {
+        if (!this.services.has(serviceName)) {
+            this.services.set(serviceName, []);
+        }
+
+        const serviceInstance = {
+            ...instance,
+            id: this.generateInstanceId(),
+            registeredAt: new Date(),
+            lastHeartbeat: new Date(),
+            status: 'healthy'
+        };
+
+        this.services.get(serviceName).push(serviceInstance);
+
+        console.log(`Service ${serviceName} registered:`, serviceInstance);
+
+        // 启动健康检查
+        this.startHealthCheck(serviceName, serviceInstance);
+
+        return serviceInstance.id;
+    }
+
+    unregister(serviceName, instanceId) {
+        const instances = this.services.get(serviceName);
+        if (instances) {
+            const index = instances.findIndex(instance =&gt; instance.id === instanceId);
+            if (index &gt; -1) {
+                const removedInstance = instances.splice(index, 1)[0];
+                this.stopHealthCheck(serviceName, instanceId);
+                console.log(`Service ${serviceName} unregistered:`, removedInstance);
+            }
+        }
+    }
+
+    heartbeat(serviceName, instanceId) {
+        const instances = this.services.get(serviceName);
+        if (instances) {
+            const instance = instances.find(inst =&gt; inst.id === instanceId);
+            if (instance) {
+                instance.lastHeartbeat = new Date();
+                instance.status = 'healthy';
+            }
+        }
+    }
+
+    getInstances(serviceName, onlyHealthy = true) {
+        const instances = this.services.get(serviceName) || [];
+
+        if (onlyHealthy) {
+            return instances.filter(instance =&gt; instance.status === 'healthy');
+        }
+
+        return [...instances];
+    }
+
+    startHealthCheck(serviceName, instance) {
+        const checkerId = `${serviceName}_${instance.id}`;
+
+        const checker = setInterval(async () =&gt; {
+            try {
+                const isHealthy = await this.checkInstanceHealth(instance);
+
+                if (isHealthy) {
+                    instance.status = 'healthy';
+                    instance.lastHealthCheck = new Date();
+                } else {
+                    instance.status = 'unhealthy';
+                    console.warn(`Instance ${instance.id} of ${serviceName} is unhealthy`);
+                }
+
+            } catch (error) {
+                instance.status = 'unhealthy';
+                console.error(`Health check failed for ${serviceName}:${instance.id}`, error);
+            }
+        }, this.healthCheckInterval);
+
+        this.healthCheckers.set(checkerId, checker);
+    }
+
+    stopHealthCheck(serviceName, instanceId) {
+        const checkerId = `${serviceName}_${instanceId}`;
+        const checker = this.healthCheckers.get(checkerId);
+
+        if (checker) {
+            clearInterval(checker);
+            this.healthCheckers.delete(checkerId);
+        }
+    }
+
+    async checkInstanceHealth(instance) {
+        try {
+            const response = await fetch(`${instance.url}/health`, {
+                method: 'GET',
+                timeout: 5000
+            });
+
+            return response.ok;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    startHealthChecking() {
+        setInterval(() =&gt; {
+            const now = new Date();
+
+            for (const [serviceName, instances] of this.services.entries()) {
+                for (const instance of instances) {
+                    // 检查心跳超时
+                    const timeSinceHeartbeat = now - instance.lastHeartbeat;
+
+                    if (timeSinceHeartbeat &gt; this.heartbeatInterval * 2) {
+                        instance.status = 'unhealthy';
+                        console.warn(`Instance ${instance.id} of ${serviceName} missed heartbeat`);
+                    }
+                }
+            }
+        }, this.heartbeatInterval);
+    }
+
+    generateInstanceId() {
+        return `inst_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    getServiceStats() {
+        const stats = {};
+
+        for (const [serviceName, instances] of this.services.entries()) {
+            stats[serviceName] = {
+                total: instances.length,
+                healthy: instances.filter(i =&gt; i.status === 'healthy').length,
+                unhealthy: instances.filter(i =&gt; i.status === 'unhealthy').length
+            };
+        }
+
+        return stats;
+    }
+}
+
+// 负载均衡器
+class LoadBalancer {
+    constructor(serviceRegistry) {
+        this.serviceRegistry = serviceRegistry;
+        this.strategies = {
+            'round-robin': new RoundRobinStrategy(),
+            'least-connections': new LeastConnectionsStrategy(),
+            'weighted': new WeightedStrategy(),
+            'random': new RandomStrategy()
+        };
+        this.defaultStrategy = 'round-robin';
+    }
+
+    async route(serviceName, strategy = this.defaultStrategy) {
+        const instances = this.serviceRegistry.getInstances(serviceName);
+
+        if (instances.length === 0) {
+            throw new Error(`No healthy instances available for service ${serviceName}`);
+        }
+
+        const loadBalancingStrategy = this.strategies[strategy];
+        if (!loadBalancingStrategy) {
+            throw new Error(`Load balancing strategy ${strategy} not found`);
+        }
+
+        return loadBalancingStrategy.selectInstance(instances);
+    }
+
+    addStrategy(name, strategy) {
+        this.strategies[name] = strategy;
+    }
+}
+
+// 轮询策略
+class RoundRobinStrategy {
+    constructor() {
+        this.counters = new Map();
+    }
+
+    selectInstance(instances) {
+        const serviceKey = instances[0]?.serviceName || 'default';
+        const currentIndex = this.counters.get(serviceKey) || 0;
+
+        const selectedInstance = instances[currentIndex % instances.length];
+        this.counters.set(serviceKey, currentIndex + 1);
+
+        return selectedInstance;
+    }
+}
+
+// 最少连接策略
+class LeastConnectionsStrategy {
+    selectInstance(instances) {
+        return instances.reduce((min, current) =&gt; {
+            const minConnections = min.activeConnections || 0;
+            const currentConnections = current.activeConnections || 0;
+
+            return currentConnections &lt; minConnections ? current : min;
+        });
+    }
+}
+
+// 加权策略
+class WeightedStrategy {
+    selectInstance(instances) {
+        const totalWeight = instances.reduce((sum, instance) =&gt; 
+            sum + (instance.weight || 1), 0
+        );
+
+        const random = Math.random() * totalWeight;
+        let weightSum = 0;
+
+        for (const instance of instances) {
+            weightSum += (instance.weight || 1);
+            if (random &lt;= weightSum) {
+                return instance;
+            }
+        }
+
+        return instances[0]; // fallback
+    }
+}
+
+// 随机策略
+class RandomStrategy {
+    selectInstance(instances) {
+        const randomIndex = Math.floor(Math.random() * instances.length);
+        return instances[randomIndex];
+    }
+}
+
+// 使用示例
+const serviceRegistry = new ServiceRegistry();
+const loadBalancer = new LoadBalancer(serviceRegistry);
+
+// 注册服务实例
+const userServiceId1 = serviceRegistry.register('user-service', {
+    url: 'http://localhost:3001',
+    weight: 2,
+    activeConnections: 0
+});
+
+const userServiceId2 = serviceRegistry.register('user-service', {
+    url: 'http://localhost:3002',
+    weight: 1,
+    activeConnections: 0
+});
+
+const orderServiceId1 = serviceRegistry.register('order-service', {
+    url: 'http://localhost:3003',
+    weight: 1,
+    activeConnections: 0
+});
+
+// 模拟心跳
+setInterval(() =&gt; {
+    serviceRegistry.heartbeat('user-service', userServiceId1);
+    serviceRegistry.heartbeat('user-service', userServiceId2);
+    serviceRegistry.heartbeat('order-service', orderServiceId1);
+}, 15000);
+
+// 路由请求
+async function handleRequest(serviceName, request) {
+    try {
+        const instance = await loadBalancer.route(serviceName, 'weighted');
+
+        console.log(`Routing request to ${serviceName} instance: ${instance.url}`);
+
+        // 增加连接计数
+        instance.activeConnections = (instance.activeConnections || 0) + 1;
+
+        try {
+            // 实际请求处理
+            const response = await fetch(`${instance.url}${request.path}`, {
+                method: request.method,
+                headers: request.headers,
+                body: request.body
+            });
+
+            return await response.json();
+
+        } finally {
+            // 减少连接计数
+            instance.activeConnections = Math.max(0, instance.activeConnections - 1);
+        }
+
+    } catch (error) {
+        console.error(`Request routing failed:`, error);
+        throw error;
+    }
+}
+
+// 获取服务统计
+console.log('Service stats:', serviceRegistry.getServiceStats());
+</code></pre>
+<h2>监控与可观测性</h2>
+<pre><code class="language-javascript">// 分布式追踪
+class DistributedTracer {
+    constructor() {
+        this.traces = new Map();
+        this.spans = new Map();
+    }
+
+    startTrace(operationName, metadata = {}) {
+        const traceId = this.generateTraceId();
+        const span = this.startSpan(traceId, null, operationName, metadata);
+
+        const trace = {
+            traceId,
+            rootSpan: span,
+            spans: [span],
+            startTime: new Date(),
+            metadata
+        };
+
+        this.traces.set(traceId, trace);
+
+        return {
+            traceId,
+            spanId: span.spanId,
+            finish: () =&gt; this.finishSpan(span.spanId),
+            startChildSpan: (childOperationName, childMetadata) =&gt; 
+                this.startSpan(traceId, span.spanId, childOperationName, childMetadata)
+        };
+    }
+
+    startSpan(traceId, parentSpanId, operationName, metadata = {}) {
+        const spanId = this.generateSpanId();
+
+        const span = {
+            traceId,
+            spanId,
+            parentSpanId,
+            operationName,
+            startTime: new Date(),
+            metadata,
+            logs: [],
+            tags: {}
+        };
+
+        this.spans.set(spanId, span);
+
+        // 添加到trace中
+        const trace = this.traces.get(traceId);
+        if (trace) {
+            trace.spans.push(span);
+        }
+
+        return span;
+    }
+
+    finishSpan(spanId, result = null, error = null) {
+        const span = this.spans.get(spanId);
+        if (!span) return;
+
+        span.endTime = new Date();
+        span.duration = span.endTime - span.startTime;
+
+        if (result) {
+            span.result = result;
+        }
+
+        if (error) {
+            span.error = {
+                message: error.message,
+                stack: error.stack
+            };
+            span.tags.error = true;
+        }
+
+        console.log(`Span finished: ${span.operationName} (${span.duration}ms)`);
+
+        // 检查是否为根span，如果是则完成整个trace
+        const trace = this.traces.get(span.traceId);
+        if (trace &amp;&amp; trace.rootSpan.spanId === spanId) {
+            this.finishTrace(span.traceId);
+        }
+    }
+
+    finishTrace(traceId) {
+        const trace = this.traces.get(traceId);
+        if (!trace) return;
+
+        trace.endTime = new Date();
+        trace.duration = trace.endTime - trace.startTime;
+
+        console.log(`Trace completed: ${traceId} (${trace.duration}ms)`);
+        console.log(`Total spans: ${trace.spans.length}`);
+
+        // 生成trace报告
+        this.generateTraceReport(trace);
+    }
+
+    logEvent(spanId, event, data = {}) {
+        const span = this.spans.get(spanId);
+        if (span) {
+            span.logs.push({
+                timestamp: new Date(),
+                event,
+                data
+            });
+        }
+    }
+
+    setTag(spanId, key, value) {
+        const span = this.spans.get(spanId);
+        if (span) {
+            span.tags[key] = value;
+        }
+    }
+
+    generateTraceReport(trace) {
+        const report = {
+            traceId: trace.traceId,
+            duration: trace.duration,
+            totalSpans: trace.spans.length,
+            services: new Set(),
+            operations: new Set(),
+            errors: []
+        };
+
+        for (const span of trace.spans) {
+            if (span.tags.service) {
+                report.services.add(span.tags.service);
+            }
+
+            report.operations.add(span.operationName);
+
+            if (span.error) {
+                report.errors.push({
+                    spanId: span.spanId,
+                    operation: span.operationName,
+                    error: span.error.message
+                });
+            }
+        }
+
+        report.services = Array.from(report.services);
+        report.operations = Array.from(report.operations);
+
+        console.log('Trace Report:', report);
+
+        return report;
+    }
+
+    generateTraceId() {
+        return `trace_${Date.now()}_${Math.random().toString(36).substr(2, 16)}`;
+    }
+
+    generateSpanId() {
+        return `span_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+    }
+
+    getTrace(traceId) {
+        return this.traces.get(traceId);
+    }
+
+    getAllTraces() {
+        return Array.from(this.traces.values());
+    }
+}
+
+// 微服务监控装饰器
+function traced(operationName, serviceName) {
+    return function(target, propertyKey, descriptor) {
+        const originalMethod = descriptor.value;
+
+        descriptor.value = async function(...args) {
+            const tracer = global.tracer || new DistributedTracer();
+
+            // 从请求上下文中获取现有的trace信息
+            const existingTraceId = this.getTraceId?.() || null;
+
+            let traceContext;
+
+            if (existingTraceId) {
+                // 继续现有trace
+                const parentSpan = this.getParentSpan?.();
+                const span = tracer.startSpan(
+                    existingTraceId, 
+                    parentSpan?.spanId, 
+                    operationName,
+                    { service: serviceName }
+                );
+
+                traceContext = {
+                    traceId: existingTraceId,
+                    spanId: span.spanId,
+                    finish: () =&gt; tracer.finishSpan(span.spanId)
+                };
+            } else {
+                // 开始新trace
+                traceContext = tracer.startTrace(operationName, { service: serviceName });
+            }
+
+            tracer.setTag(traceContext.spanId, 'service', serviceName);
+            tracer.setTag(traceContext.spanId, 'method', propertyKey);
+
+            try {
+                const result = await originalMethod.apply(this, args);
+
+                tracer.logEvent(traceContext.spanId, 'method_completed', {
+                    result: typeof result === 'object' ? 'object' : result
+                });
+
+                traceContext.finish(result);
+
+                return result;
+            } catch (error) {
+                tracer.logEvent(traceContext.spanId, 'method_error', {
+                    error: error.message
+                });
+
+                tracer.finishSpan(traceContext.spanId, null, error);
+
+                throw error;
+            }
+        };
+
+        return descriptor;
+    };
+}
+
+// 使用示例：带追踪的服务类
+class UserServiceWithTracing {
+    constructor(userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    @traced('create_user', 'user-service')
+    async createUser(userData) {
+        // 模拟数据验证
+        await this.validateUserData(userData);
+
+        // 模拟数据库操作
+        const user = await this.userRepository.create(userData);
+
+        // 模拟外部服务调用
+        await this.notifyUserCreated(user);
+
+        return user;
+    }
+
+    @traced('validate_user_data', 'user-service')
+    async validateUserData(userData) {
+        // 模拟验证逻辑
+        await new Promise(resolve =&gt; setTimeout(resolve, 50));
+
+        if (!userData.email) {
+            throw new Error('Email is required');
+        }
+
+        return true;
+    }
+
+    @traced('notify_user_created', 'user-service')
+    async notifyUserCreated(user) {
+        // 模拟通知服务调用
+        await new Promise(resolve =&gt; setTimeout(resolve, 100));
+
+        console.log(`User created notification sent for ${user.email}`);
+    }
+}
+
+// 全局tracer设置
+global.tracer = new DistributedTracer();
+
+// 使用示例
+const userService = new UserServiceWithTracing(new UserRepository());
+
+userService.createUser({
+    email: 'test@example.com',
+    firstName: 'John',
+    lastName: 'Doe'
+}).then(user =&gt; {
+    console.log('User created:', user);
+}).catch(error =&gt; {
+    console.error('User creation failed:', error);
+});
+</code></pre>
+<h2>总结与经验</h2>
+<p>通过这次微服务架构的实战经验，我总结出以下关键点：</p>
+<h3>架构设计要点</h3>
+<ol>
+<li><strong>合理的服务边界</strong>：使用DDD指导服务拆分，避免过度拆分</li>
+<li><strong>数据一致性</strong>：采用最终一致性和Saga模式处理分布式事务</li>
+<li><strong>服务通信</strong>：同步和异步通信相结合，合理使用熔断器和重试机制</li>
+<li><strong>可观测性</strong>：完善的日志、监控和追踪体系</li>
+</ol>
+<h3>实施建议</h3>
+<ol>
+<li><strong>渐进式迁移</strong>：从单体应用逐步抽取服务，而不是一次性重写</li>
+<li><strong>团队组织</strong>：按照康威定律组织团队结构</li>
+<li><strong>自动化测试</strong>：完善的单元测试、集成测试和端到端测试</li>
+<li><strong>运维自动化</strong>：CI/CD、容器化和基础设施即代码</li>
+</ol>
+<h3>常见陷阱</h3>
+<ol>
+<li><strong>分布式复杂性</strong>：网络延迟、部分故障、数据一致性问题</li>
+<li><strong>运维负担</strong>：服务数量增加带来的运维复杂性</li>
+<li><strong>调试困难</strong>：分布式系统的问题定位和调试</li>
+<li><strong>性能开销</strong>：服务间通信和序列化的性能影响</li>
+</ol>
+<p>微服务架构不是银弹，需要根据团队能力、业务复杂度和技术要求来决定是否采用。但当团队和业务发展到一定规模时，微服务架构能够带来更好的可维护性、可扩展性和团队自治性。</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

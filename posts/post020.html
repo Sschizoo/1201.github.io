@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DevOps实践：从手动部署到全自动化CI/CD流水线 - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>DevOps实践：从手动部署到全自动化CI/CD流水线</h1>
+                    <p class="article-date">2025年07月03日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p><strong>Date: June 7, 2024</strong></p>
+<p>今天想分享一下我们团队在DevOps实践方面的演进历程。从最初的手动部署到现在的全自动化CI/CD流水线，这个过程充满了挑战和收获。</p>
+<h2>传统部署模式的痛点</h2>
+<h3>手动部署时代的困扰</h3>
+<p>还记得几年前，我们的部署流程是这样的：</p>
+<pre><code class="language-bash"># 传统的手动部署流程
+#!/bin/bash
+
+echo &quot;开始部署...&quot;
+
+# 1. 连接到生产服务器
+ssh user@production-server
+
+# 2. 备份当前版本
+cp -r /var/www/app /var/www/app_backup_$(date +%Y%m%d_%H%M%S)
+
+# 3. 拉取最新代码
+cd /var/www/app
+git pull origin main
+
+# 4. 安装依赖
+npm install --production
+
+# 5. 构建项目
+npm run build
+
+# 6. 重启服务
+pm2 restart app
+
+# 7. 检查服务状态
+pm2 status
+
+echo &quot;部署完成！&quot;
+</code></pre>
+<p>这种方式存在很多问题：</p>
+<pre><code class="language-javascript">const manualDeploymentProblems = {
+  人为错误: [
+    &quot;忘记执行某个步骤&quot;,
+    &quot;在错误的环境执行命令&quot;,
+    &quot;版本回滚困难&quot;,
+    &quot;配置文件修改错误&quot;
+  ],
+
+  效率问题: [
+    &quot;部署时间长，需要人工监控&quot;,
+    &quot;多环境部署需要重复操作&quot;,
+    &quot;回滚流程复杂&quot;,
+    &quot;无法并行部署多个服务&quot;
+  ],
+
+  质量风险: [
+    &quot;缺少自动化测试&quot;,
+    &quot;生产环境直接测试&quot;,
+    &quot;没有部署审核流程&quot;,
+    &quot;监控和告警不及时&quot;
+  ],
+
+  协作困难: [
+    &quot;部署权限管理混乱&quot;,
+    &quot;缺少部署记录&quot;,
+    &quot;团队成员部署流程不一致&quot;,
+    &quot;知识传递困难&quot;
+  ]
+};
+</code></pre>
+<h2>CI/CD流水线设计</h2>
+<h3>整体架构</h3>
+<p>我们设计的CI/CD流水线架构如下：</p>
+<pre><code class="language-yaml"># .github/workflows/ci-cd.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  NODE_VERSION: '18'
+  DOCKER_REGISTRY: 'your-registry.com'
+  APP_NAME: 'web-app'
+
+jobs:
+  # 代码质量检查
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run linting
+      run: npm run lint
+
+    - name: Run type checking
+      run: npm run type-check
+
+    - name: Run unit tests
+      run: npm run test:unit
+
+    - name: Run integration tests
+      run: npm run test:integration
+
+    - name: Generate test coverage
+      run: npm run test:coverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+
+  # 安全扫描
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Run npm audit
+      run: npm audit --audit-level high
+
+    - name: Run Snyk security scan
+      uses: snyk/actions/node@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+    - name: Run SAST scan
+      uses: github/codeql-action/init@v2
+      with:
+        languages: javascript
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+
+  # 构建和推送Docker镜像
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Login to Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.DOCKER_REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ env.APP_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # 部署到staging环境
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: staging
+    steps:
+    - name: Deploy to staging
+      uses: ./.github/actions/deploy
+      with:
+        environment: staging
+        image-tag: ${{ needs.build-and-push.outputs.image-tag }}
+        kubeconfig: ${{ secrets.STAGING_KUBECONFIG }}
+
+    - name: Run smoke tests
+      run: |
+        npm run test:smoke -- --baseUrl=https://staging.example.com
+
+  # 部署到生产环境
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-staging]
+    environment: production
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - name: Deploy to production
+      uses: ./.github/actions/deploy
+      with:
+        environment: production
+        image-tag: ${{ needs.build-and-push.outputs.image-tag }}
+        kubeconfig: ${{ secrets.PRODUCTION_KUBECONFIG }}
+
+    - name: Run production health checks
+      run: |
+        npm run test:health -- --baseUrl=https://app.example.com
+
+    - name: Notify deployment success
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+</code></pre>
+<h3>自定义部署Action</h3>
+<pre><code class="language-yaml"># .github/actions/deploy/action.yml
+name: 'Deploy Application'
+description: 'Deploy application to Kubernetes'
+inputs:
+  environment:
+    description: 'Target environment'
+    required: true
+  image-tag:
+    description: 'Docker image tag'
+    required: true
+  kubeconfig:
+    description: 'Kubernetes config'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+  - name: Setup kubectl
+    uses: azure/setup-kubectl@v3
+    with:
+      version: 'v1.27.0'
+
+  - name: Setup Helm
+    uses: azure/setup-helm@v3
+    with:
+      version: '3.12.0'
+
+  - name: Configure kubectl
+    shell: bash
+    run: |
+      echo &quot;${{ inputs.kubeconfig }}&quot; | base64 -d &gt; kubeconfig
+      export KUBECONFIG=kubeconfig
+
+  - name: Deploy with Helm
+    shell: bash
+    run: |
+      helm upgrade --install ${{ github.event.repository.name }} ./helm \
+        --namespace ${{ inputs.environment }} \
+        --create-namespace \
+        --set image.tag=${{ inputs.image-tag }} \
+        --set environment=${{ inputs.environment }} \
+        --wait --timeout=600s
+
+  - name: Verify deployment
+    shell: bash
+    run: |
+      kubectl wait --for=condition=available --timeout=300s \
+        deployment/${{ github.event.repository.name }} \
+        -n ${{ inputs.environment }}
+</code></pre>
+<h2>Docker化最佳实践</h2>
+<h3>多阶段构建Dockerfile</h3>
+<pre><code class="language-dockerfile"># 多阶段构建优化镜像大小
+FROM node:18-alpine AS base
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production &amp;&amp; npm cache clean --force
+
+# 开发依赖安装
+FROM base AS dev-deps
+RUN npm ci
+
+# 构建阶段
+FROM dev-deps AS build
+COPY . .
+RUN npm run build
+
+# 生产镜像
+FROM node:18-alpine AS production
+
+# 安全增强
+RUN addgroup -g 1001 -S nodejs &amp;&amp; \
+    adduser -S nextjs -u 1001
+
+# 安装必要的系统包
+RUN apk add --no-cache \
+    dumb-init \
+    curl
+
+WORKDIR /app
+
+# 复制生产依赖
+COPY --from=base /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/public ./public
+COPY package.json ./
+
+# 设置正确的权限
+RUN chown -R nextjs:nodejs /app
+USER nextjs
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
+
+EXPOSE 3000
+
+# 使用dumb-init处理信号
+ENTRYPOINT [&quot;dumb-init&quot;, &quot;--&quot;]
+CMD [&quot;npm&quot;, &quot;start&quot;]
+</code></pre>
+<h3>Docker Compose用于本地开发</h3>
+<pre><code class="language-yaml"># docker-compose.yml
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      target: dev-deps
+    volumes:
+      - .:/app
+      - /app/node_modules
+    ports:
+      - &quot;3000:3000&quot;
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://user:pass@db:5432/appdb
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - db
+      - redis
+    command: npm run dev
+
+  db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - &quot;5432:5432&quot;
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - &quot;6379:6379&quot;
+    volumes:
+      - redis_data:/data
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - &quot;80:80&quot;
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - app
+
+volumes:
+  postgres_data:
+  redis_data:
+</code></pre>
+<h2>基础设施即代码(IaC)</h2>
+<h3>Terraform配置</h3>
+<pre><code class="language-hcl"># infrastructure/main.tf
+terraform {
+  required_version = &quot;&gt;= 1.0&quot;
+  required_providers {
+    aws = {
+      source  = &quot;hashicorp/aws&quot;
+      version = &quot;~&gt; 5.0&quot;
+    }
+    kubernetes = {
+      source  = &quot;hashicorp/kubernetes&quot;
+      version = &quot;~&gt; 2.20&quot;
+    }
+  }
+
+  backend &quot;s3&quot; {
+    bucket = &quot;your-terraform-state&quot;
+    key    = &quot;app/terraform.tfstate&quot;
+    region = &quot;us-west-2&quot;
+  }
+}
+
+provider &quot;aws&quot; {
+  region = var.aws_region
+}
+
+# EKS Cluster
+module &quot;eks&quot; {
+  source = &quot;terraform-aws-modules/eks/aws&quot;
+
+  cluster_name    = var.cluster_name
+  cluster_version = &quot;1.27&quot;
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  # Node groups
+  eks_managed_node_groups = {
+    general = {
+      desired_size = 2
+      max_size     = 10
+      min_size     = 1
+
+      instance_types = [&quot;t3.medium&quot;]
+      capacity_type  = &quot;ON_DEMAND&quot;
+
+      k8s_labels = {
+        Environment = var.environment
+        NodeGroup   = &quot;general&quot;
+      }
+    }
+  }
+
+  # Cluster access
+  cluster_endpoint_private_access = true
+  cluster_endpoint_public_access  = true
+
+  cluster_addons = {
+    coredns = {
+      most_recent = true
+    }
+    kube-proxy = {
+      most_recent = true
+    }
+    vpc-cni = {
+      most_recent = true
+    }
+    aws-ebs-csi-driver = {
+      most_recent = true
+    }
+  }
+}
+
+# VPC
+module &quot;vpc&quot; {
+  source = &quot;terraform-aws-modules/vpc/aws&quot;
+
+  name = &quot;${var.cluster_name}-vpc&quot;
+  cidr = &quot;10.0.0.0/16&quot;
+
+  azs             = data.aws_availability_zones.available.names
+  private_subnets = [&quot;10.0.1.0/24&quot;, &quot;10.0.2.0/24&quot;, &quot;10.0.3.0/24&quot;]
+  public_subnets  = [&quot;10.0.101.0/24&quot;, &quot;10.0.102.0/24&quot;, &quot;10.0.103.0/24&quot;]
+
+  enable_nat_gateway = true
+  enable_vpn_gateway = false
+
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    &quot;kubernetes.io/cluster/${var.cluster_name}&quot; = &quot;shared&quot;
+  }
+
+  public_subnet_tags = {
+    &quot;kubernetes.io/cluster/${var.cluster_name}&quot; = &quot;shared&quot;
+    &quot;kubernetes.io/role/elb&quot;                    = &quot;1&quot;
+  }
+
+  private_subnet_tags = {
+    &quot;kubernetes.io/cluster/${var.cluster_name}&quot; = &quot;shared&quot;
+    &quot;kubernetes.io/role/internal-elb&quot;           = &quot;1&quot;
+  }
+}
+
+# RDS Database
+resource &quot;aws_db_instance&quot; &quot;main&quot; {
+  identifier = &quot;${var.cluster_name}-db&quot;
+
+  engine         = &quot;postgres&quot;
+  engine_version = &quot;14.9&quot;
+  instance_class = &quot;db.t3.micro&quot;
+
+  allocated_storage     = 20
+  max_allocated_storage = 100
+  storage_type          = &quot;gp2&quot;
+  storage_encrypted     = true
+
+  db_name  = var.db_name
+  username = var.db_username
+  password = var.db_password
+
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+
+  backup_retention_period = 7
+  backup_window          = &quot;03:00-04:00&quot;
+  maintenance_window     = &quot;Sun:04:00-Sun:05:00&quot;
+
+  skip_final_snapshot = true
+  deletion_protection = false
+
+  tags = {
+    Name = &quot;${var.cluster_name}-db&quot;
+  }
+}
+</code></pre>
+<h3>Helm Charts</h3>
+<pre><code class="language-yaml"># helm/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include &quot;app.fullname&quot; . }}
+  labels:
+    {{- include &quot;app.labels&quot; . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include &quot;app.selectorLabels&quot; . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath &quot;/configmap.yaml&quot;) . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath &quot;/secret.yaml&quot;) . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include &quot;app.selectorLabels&quot; . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include &quot;app.serviceAccountName&quot; . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: &quot;{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}&quot;
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          env:
+            - name: NODE_ENV
+              value: {{ .Values.environment }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include &quot;app.fullname&quot; . }}-secret
+                  key: database-url
+          envFrom:
+            - configMapRef:
+                name: {{ include &quot;app.fullname&quot; . }}-config
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: var-cache
+              mountPath: /var/cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: var-cache
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+</code></pre>
+<h2>监控和告警体系</h2>
+
+为保证系统性能与用户体验，需部署运行状态监测与自动优化机制。系统应对内存、CPU、缓存使用等关键指标进行实时监控，并可基于策略自动调整模型加载、数据缓存与渲染流程。应提供交互式优化工具，支持用户在运行场景中对模型结构进行调整、测试与版本管理，便于快速响应需求变化与系统扩展。
+
+能源资产模型具备结构复杂、数据量大、动态性强等特征，对渲染系统提出了实时、高精度与多终端适配的要求。本模块聚焦于模型加载效率和渲染性能的全面提升，构建分层分块加载体系与可视性驱动的智能渲染机制，实现"数据少加载、内容快呈现"的目标。通过分级模型表达、局部渲染与管线优化等技术手段，系统将大幅提升模型响应速度、交互流畅度与图像质量表现，为各类终端提供一致、稳定的渲染体验，支撑从台式计算机到移动端、ARVR设备的统一访问。
+
+系统需检测规划方案中因线路调整、开关配置等因素导致的接线模式退化现象。退化判定应基于标准接线配置(如单母线、双母线、环网结构)与实际规划方案进行对比分析，识别简化、降级或断链情形。检测结果需实时生成退化预警信息，标明退化等级、波及范围与关键设备，支持联动图层高亮显示。预警信息应输出至调度或运维界面，用于辅助人员快速响应与规避风险。
+
+<h3>Prometheus监控配置</h3>
+<pre><code class="language-yaml"># monitoring/prometheus-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - &quot;/etc/prometheus/rules/*.yml&quot;
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+
+    scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      - job_name: 'app'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+</code></pre>
+<h3>告警规则</h3>
+<pre><code class="language-yaml"># monitoring/alert-rules.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: app-alerts
+spec:
+  groups:
+  - name: app.rules
+    rules:
+    - alert: HighErrorRate
+      expr: rate(http_requests_total{status=~&quot;5..&quot;}[5m]) / rate(http_requests_total[5m]) &gt; 0.1
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: &quot;High error rate detected&quot;
+        description: &quot;Error rate is {{ $value | humanizePercentage }} for {{ $labels.instance }}&quot;
+
+    - alert: HighResponseTime
+      expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) &gt; 0.5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: &quot;High response time detected&quot;
+        description: &quot;95th percentile response time is {{ $value }}s for {{ $labels.instance }}&quot;
+
+    - alert: PodCrashLooping
+      expr: increase(kube_pod_container_status_restarts_total[1h]) &gt; 5
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: &quot;Pod is crash looping&quot;
+        description: &quot;Pod {{ $labels.pod }} has restarted {{ $value }} times in the last hour&quot;
+
+    - alert: DeploymentReplicasMismatch
+      expr: kube_deployment_spec_replicas != kube_deployment_status_available_replicas
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: &quot;Deployment replicas mismatch&quot;
+        description: &quot;Deployment {{ $labels.deployment }} has {{ $value }} available replicas, expected {{ $labels.spec_replicas }}&quot;
+</code></pre>
+<h2>自动化测试集成</h2>
+<h3>测试流水线</h3>
+<pre><code class="language-javascript">// tests/integration/deployment.test.js
+const request = require('supertest');
+const { expect } = require('chai');
+
+describe('Deployment Integration Tests', () =&gt; {
+  const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+
+  describe('Health Checks', () =&gt; {
+    it('should respond to health check', async () =&gt; {
+      const response = await request(baseUrl)
+        .get('/health')
+        .expect(200);
+
+      expect(response.body).to.have.property('status', 'ok');
+      expect(response.body).to.have.property('timestamp');
+      expect(response.body).to.have.property('version');
+    });
+
+    it('should respond to readiness check', async () =&gt; {
+      const response = await request(baseUrl)
+        .get('/ready')
+        .expect(200);
+
+      expect(response.body).to.have.property('status', 'ready');
+      expect(response.body).to.have.property('database', 'connected');
+      expect(response.body).to.have.property('redis', 'connected');
+    });
+  });
+
+  describe('API Endpoints', () =&gt; {
+    it('should handle API requests', async () =&gt; {
+      const response = await request(baseUrl)
+        .get('/api/v1/users')
+        .expect(200);
+
+      expect(response.body).to.be.an('array');
+    });
+
+    it('should handle authentication', async () =&gt; {
+      await request(baseUrl)
+        .get('/api/v1/protected')
+        .expect(401);
+    });
+  });
+
+  describe('Performance Tests', () =&gt; {
+    it('should respond within acceptable time', async () =&gt; {
+      const start = Date.now();
+
+      await request(baseUrl)
+        .get('/api/v1/users')
+        .expect(200);
+
+      const duration = Date.now() - start;
+      expect(duration).to.be.below(500); // 500ms
+    });
+  });
+});
+</code></pre>
+<h3>E2E测试</h3>
+<pre><code class="language-javascript">// tests/e2e/user-journey.spec.js
+const { test, expect } = require('@playwright/test');
+
+test.describe('User Journey', () =&gt; {
+  test('user can complete full signup flow', async ({ page }) =&gt; {
+    // Navigate to signup page
+    await page.goto('/signup');
+
+    // Fill form
+    await page.fill('[data-testid=email]', 'test@example.com');
+    await page.fill('[data-testid=password]', 'SecurePass123!');
+    await page.fill('[data-testid=confirm-password]', 'SecurePass123!');
+
+    // Submit form
+    await page.click('[data-testid=submit]');
+
+    // Wait for success message
+    await expect(page.locator('[data-testid=success-message]')).toBeVisible();
+
+    // Verify redirect to dashboard
+    await expect(page).toHaveURL('/dashboard');
+
+    // Verify user is logged in
+    await expect(page.locator('[data-testid=user-menu]')).toBeVisible();
+  });
+
+  test('user can navigate between pages', async ({ page }) =&gt; {
+    await page.goto('/');
+
+    // Check navigation links
+    await page.click('a[href=&quot;/about&quot;]');
+    await expect(page).toHaveURL('/about');
+
+    await page.click('a[href=&quot;/contact&quot;]');
+    await expect(page).toHaveURL('/contact');
+
+    // Check responsive navigation
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.click('[data-testid=mobile-menu-toggle]');
+    await expect(page.locator('[data-testid=mobile-menu]')).toBeVisible();
+  });
+});
+</code></pre>
+<h2>回滚和灾难恢复</h2>
+<h3>自动回滚机制</h3>
+<pre><code class="language-bash">#!/bin/bash
+# scripts/rollback.sh
+
+set -e
+
+NAMESPACE=${1:-production}
+RELEASE_NAME=${2:-app}
+ROLLBACK_VERSION=${3:-0}  # 0 means previous version
+
+echo &quot;🔄 Starting rollback process...&quot;
+
+# Get current revision
+CURRENT_REVISION=$(helm list -n $NAMESPACE -o json | jq -r &quot;.[] | select(.name==\&quot;$RELEASE_NAME\&quot;) | .revision&quot;)
+echo &quot;Current revision: $CURRENT_REVISION&quot;
+
+# Calculate target revision
+if [ &quot;$ROLLBACK_VERSION&quot; = &quot;0&quot; ]; then
+  TARGET_REVISION=$((CURRENT_REVISION - 1))
+else
+  TARGET_REVISION=$ROLLBACK_VERSION
+fi
+
+echo &quot;Target revision: $TARGET_REVISION&quot;
+
+# Perform rollback
+helm rollback $RELEASE_NAME $TARGET_REVISION -n $NAMESPACE
+
+# Wait for rollback to complete
+kubectl rollout status deployment/$RELEASE_NAME -n $NAMESPACE --timeout=300s
+
+# Verify rollback
+echo &quot;🔍 Verifying rollback...&quot;
+NEW_REVISION=$(helm list -n $NAMESPACE -o json | jq -r &quot;.[] | select(.name==\&quot;$RELEASE_NAME\&quot;) | .revision&quot;)
+
+if [ &quot;$NEW_REVISION&quot; -gt &quot;$CURRENT_REVISION&quot; ]; then
+  echo &quot;✅ Rollback completed successfully. New revision: $NEW_REVISION&quot;
+else
+  echo &quot;❌ Rollback failed&quot;
+  exit 1
+fi
+
+# Run health checks
+echo &quot;🏥 Running health checks...&quot;
+kubectl wait --for=condition=available --timeout=300s deployment/$RELEASE_NAME -n $NAMESPACE
+
+# Test application endpoints
+if command -v curl &amp;&gt; /dev/null; then
+  INGRESS_IP=$(kubectl get ingress -n $NAMESPACE -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
+  if [ ! -z &quot;$INGRESS_IP&quot; ]; then
+    curl -f http://$INGRESS_IP/health || {
+      echo &quot;❌ Health check failed after rollback&quot;
+      exit 1
+    }
+    echo &quot;✅ Health check passed&quot;
+  fi
+fi
+
+echo &quot;🎉 Rollback process completed successfully!&quot;
+</code></pre>
+<h3>数据库备份和恢复</h3>
+<pre><code class="language-bash">#!/bin/bash
+# scripts/backup-restore.sh
+
+DB_HOST=${DB_HOST:-localhost}
+DB_NAME=${DB_NAME:-app_production}
+DB_USER=${DB_USER:-app_user}
+BACKUP_PATH=${BACKUP_PATH:-/backups}
+
+backup_database() {
+  local timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_file=&quot;$BACKUP_PATH/${DB_NAME}_${timestamp}.sql&quot;
+
+  echo &quot;📦 Creating database backup...&quot;
+  pg_dump -h $DB_HOST -U $DB_USER -d $DB_NAME &gt; $backup_file
+
+  # Compress backup
+  gzip $backup_file
+
+  echo &quot;✅ Backup created: ${backup_file}.gz&quot;
+
+  # Clean old backups (keep last 7 days)
+  find $BACKUP_PATH -name &quot;${DB_NAME}_*.sql.gz&quot; -mtime +7 -delete
+}
+
+restore_database() {
+  local backup_file=$1
+
+  if [ ! -f &quot;$backup_file&quot; ]; then
+    echo &quot;❌ Backup file not found: $backup_file&quot;
+    exit 1
+  fi
+
+  echo &quot;⚠️  WARNING: This will replace the current database!&quot;
+  read -p &quot;Are you sure you want to continue? (y/N): &quot; -n 1 -r
+  echo
+
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo &quot;Operation cancelled&quot;
+    exit 0
+  fi
+
+  echo &quot;🔄 Restoring database from backup...&quot;
+
+  # Create a backup of current state first
+  backup_database
+
+  # Restore from backup
+  if [[ $backup_file == *.gz ]]; then
+    gunzip -c $backup_file | psql -h $DB_HOST -U $DB_USER -d $DB_NAME
+  else
+    psql -h $DB_HOST -U $DB_USER -d $DB_NAME &lt; $backup_file
+  fi
+
+  echo &quot;✅ Database restored successfully&quot;
+}
+
+case &quot;$1&quot; in
+  backup)
+    backup_database
+    ;;
+  restore)
+    restore_database &quot;$2&quot;
+    ;;
+  *)
+    echo &quot;Usage: $0 {backup|restore &lt;backup_file&gt;}&quot;
+    exit 1
+    ;;
+esac
+</code></pre>
+<h2>成果与收益</h2>
+<h3>量化指标</h3>
+<p>通过实施完整的DevOps流水线，我们获得了显著的改善：</p>
+<pre><code class="language-javascript">const devopsMetrics = {
+  部署频率: {
+    之前: &quot;每月1-2次&quot;,
+    现在: &quot;每天3-5次&quot;,
+    改善: &quot;提升15-25倍&quot;
+  },
+
+  部署时间: {
+    之前: &quot;2-4小时&quot;,
+    现在: &quot;10-15分钟&quot;,
+    改善: &quot;减少80-90%&quot;
+  },
+
+  故障恢复时间: {
+    之前: &quot;4-8小时&quot;,
+    现在: &quot;5-15分钟&quot;,
+    改善: &quot;减少95%&quot;
+  },
+
+  变更失败率: {
+    之前: &quot;25-30%&quot;,
+    现在: &quot;2-5%&quot;,
+    改善: &quot;降低85%&quot;
+  },
+
+  团队效率: {
+    开发时间占比: &quot;从60%提升到85%&quot;,
+    运维时间占比: &quot;从40%降低到15%&quot;,
+    故障处理时间: &quot;减少70%&quot;
+  }
+};
+</code></pre>
+<h3>团队能力提升</h3>
+<pre><code class="language-javascript">const teamImprovements = {
+  技术能力: [
+    &quot;全员掌握容器化技术&quot;,
+    &quot;深入理解Kubernetes&quot;,
+    &quot;熟练使用监控工具&quot;,
+    &quot;掌握基础设施即代码&quot;
+  ],
+
+  协作效率: [
+    &quot;代码审查标准化&quot;,
+    &quot;部署流程透明化&quot;,
+    &quot;问题排查系统化&quot;,
+    &quot;知识分享常态化&quot;
+  ],
+
+  质量保障: [
+    &quot;自动化测试覆盖率95%+&quot;,
+    &quot;代码质量门禁&quot;,
+    &quot;安全扫描集成&quot;,
+    &quot;性能监控完善&quot;
+  ]
+};
+</code></pre>
+<h2>经验总结</h2>
+<h3>最佳实践</h3>
+<ol>
+<li><strong>循序渐进</strong>：不要试图一次性实现所有功能，从简单的CI开始</li>
+<li><strong>自动化优先</strong>：任何重复的操作都应该自动化</li>
+<li><strong>监控先行</strong>：在部署新功能前先建立监控</li>
+<li><strong>安全左移</strong>：在开发阶段就集成安全检查</li>
+<li><strong>文档完善</strong>：维护清晰的流程文档和故障处理手册</li>
+</ol>
+<h3>常见陷阱</h3>
+<ol>
+<li><strong>过度复杂化</strong>：不要为了自动化而自动化</li>
+<li><strong>忽视安全</strong>：CI/CD流水线本身也需要安全保护</li>
+<li><strong>缺少测试</strong>：自动化脚本也需要测试</li>
+<li><strong>环境不一致</strong>：确保所有环境的配置一致性</li>
+<li><strong>权限管理</strong>：合理设置访问权限，避免过度授权</li>
+</ol>
+<h3>未来规划</h3>
+<ol>
+<li><strong>GitOps实践</strong>：使用ArgoCD等工具实现GitOps</li>
+<li><strong>服务网格</strong>：引入Istio提升微服务治理能力</li>
+<li><strong>混沌工程</strong>：实施混沌工程提升系统韧性</li>
+<li><strong>AI运维</strong>：利用AI技术提升运维效率</li>
+<li><strong>成本优化</strong>：通过自动化实现成本的精细化管理</li>
+</ol>
+<p>DevOps是一个持续改进的过程，关键是要有合适的工具、流程和文化。通过不断的实践和优化，我们的团队已经从传统的手动部署模式转变为现代化的自动化运维体系，这不仅提升了效率，也大大改善了系统的可靠性和团队的工作体验。</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>

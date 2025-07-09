@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Database Design Patterns for Modern Web Applications - 我的博客</title>
+    <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="slogan">记录思考，分享生活</h1>
+    </header>
+    
+    <main>
+        <div class="container">
+            <a href="../index.html" class="back-link">← 返回首页</a>
+            
+            <article class="article-page">
+                <div class="article-header">
+                    <h1>Database Design Patterns for Modern Web Applications</h1>
+                    <p class="article-date">2025年07月03日</p>
+                </div>
+                
+                <div class="article-content">
+                    <p><strong>Date: February 28, 2024</strong></p>
+<p>Database design is often overlooked in modern web development, but it's the foundation that can make or break an application's performance and scalability. Today I want to share some database design patterns that I've found invaluable in my recent projects.</p>
+<h2>The Evolution of Database Design</h2>
+<p>Over the years, I've witnessed the database landscape evolve dramatically. From traditional relational databases to NoSQL solutions, and now to hybrid approaches that combine the best of both worlds. Each paradigm has its strengths and use cases.</p>
+<h3>Traditional Relational Design</h3>
+<p>The classic normalized relational design remains relevant for many applications:</p>
+<pre><code class="language-sql">-- Users table
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- User profiles table
+CREATE TABLE user_profiles (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    bio TEXT,
+    avatar_url VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Posts table
+CREATE TABLE posts (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    content TEXT,
+    status VARCHAR(20) DEFAULT 'draft',
+    published_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+</code></pre>
+<h3>Modern Hybrid Approach</h3>
+<p>However, for complex applications, I often use a hybrid approach that combines relational and document storage:</p>
+<pre><code class="language-javascript">// User document in MongoDB
+{
+  &quot;_id&quot;: ObjectId(&quot;...&quot;),
+  &quot;username&quot;: &quot;john_doe&quot;,
+  &quot;email&quot;: &quot;john@example.com&quot;,
+  &quot;profile&quot;: {
+    &quot;firstName&quot;: &quot;John&quot;,
+    &quot;lastName&quot;: &quot;Doe&quot;,
+    &quot;bio&quot;: &quot;Software developer passionate about clean code&quot;,
+    &quot;avatarUrl&quot;: &quot;https://example.com/avatars/john.jpg&quot;,
+    &quot;preferences&quot;: {
+      &quot;theme&quot;: &quot;dark&quot;,
+      &quot;notifications&quot;: {
+        &quot;email&quot;: true,
+        &quot;push&quot;: false
+      }
+    }
+  },
+  &quot;metadata&quot;: {
+    &quot;createdAt&quot;: ISODate(&quot;2024-02-28T00:00:00Z&quot;),
+    &quot;updatedAt&quot;: ISODate(&quot;2024-02-28T00:00:00Z&quot;),
+    &quot;lastLoginAt&quot;: ISODate(&quot;2024-02-28T10:30:00Z&quot;)
+  }
+}
+</code></pre>
+<h2>Database Design Patterns</h2>
+<h3>1. Repository Pattern</h3>
+<p>The repository pattern abstracts database operations and provides a clean interface:</p>
+<pre><code class="language-javascript">// Base repository interface
+class BaseRepository {
+  constructor(model) {
+    this.model = model;
+  }
+
+  async findById(id) {
+    return await this.model.findById(id);
+  }
+
+  async findAll(options = {}) {
+    const { limit = 10, offset = 0, sort = {} } = options;
+    return await this.model.find({})
+      .sort(sort)
+      .limit(limit)
+      .skip(offset);
+  }
+
+  async create(data) {
+    return await this.model.create(data);
+  }
+
+  async update(id, data) {
+    return await this.model.findByIdAndUpdate(id, data, { new: true });
+  }
+
+  async delete(id) {
+    return await this.model.findByIdAndDelete(id);
+  }
+}
+
+// User repository with specific methods
+class UserRepository extends BaseRepository {
+  constructor(userModel) {
+    super(userModel);
+  }
+
+  async findByEmail(email) {
+    return await this.model.findOne({ email });
+  }
+
+  async findByUsername(username) {
+    return await this.model.findOne({ username });
+  }
+
+  async findActiveUsers(options = {}) {
+    return await this.model.find({ 
+      status: 'active',
+      lastLoginAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
+    }).sort({ lastLoginAt: -1 });
+  }
+}
+</code></pre>
+<h3>2. Unit of Work Pattern</h3>
+<p>For complex operations involving multiple entities:</p>
+<pre><code class="language-javascript">class UnitOfWork {
+  constructor() {
+    this.newEntities = [];
+    this.dirtyEntities = [];
+    this.removedEntities = [];
+    this.repositories = new Map();
+  }
+
+  registerNew(entity) {
+    this.newEntities.push(entity);
+  }
+
+  registerDirty(entity) {
+    this.dirtyEntities.push(entity);
+  }
+
+  registerRemoved(entity) {
+    this.removedEntities.push(entity);
+  }
+
+  async commit() {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      // Insert new entities
+      for (const entity of this.newEntities) {
+        await entity.save({ session });
+      }
+
+      // Update dirty entities
+      for (const entity of this.dirtyEntities) {
+        await entity.save({ session });
+      }
+
+      // Remove entities
+      for (const entity of this.removedEntities) {
+        await entity.remove({ session });
+      }
+
+      await session.commitTransaction();
+      this.clear();
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  clear() {
+    this.newEntities = [];
+    this.dirtyEntities = [];
+    this.removedEntities = [];
+  }
+}
+</code></pre>
+<h3>3. Query Builder Pattern</h3>
+<p>For complex dynamic queries:</p>
+<pre><code class="language-javascript">class QueryBuilder {
+  constructor(model) {
+    this.model = model;
+    this.query = {};
+    this.options = {};
+  }
+
+  where(field, operator, value) {
+    if (arguments.length === 2) {
+      value = operator;
+      operator = '$eq';
+    }
+
+    this.query[field] = { [operator]: value };
+    return this;
+  }
+
+  whereIn(field, values) {
+    this.query[field] = { $in: values };
+    return this;
+  }
+
+  whereBetween(field, start, end) {
+    this.query[field] = { $gte: start, $lte: end };
+    return this;
+  }
+
+  sort(field, direction = 1) {
+    this.options.sort = { [field]: direction };
+    return this;
+  }
+
+  limit(count) {
+    this.options.limit = count;
+    return this;
+  }
+
+  skip(count) {
+    this.options.skip = count;
+    return this;
+  }
+
+  populate(path) {
+    this.options.populate = path;
+    return this;
+  }
+
+  async execute() {
+    let query = this.model.find(this.query);
+
+    if (this.options.sort) {
+      query = query.sort(this.options.sort);
+    }
+
+    if (this.options.limit) {
+      query = query.limit(this.options.limit);
+    }
+
+    if (this.options.skip) {
+      query = query.skip(this.options.skip);
+    }
+
+    if (this.options.populate) {
+      query = query.populate(this.options.populate);
+    }
+
+    return await query;
+  }
+}
+
+// Usage example
+const users = await new QueryBuilder(User)
+  .where('status', 'active')
+  .whereIn('role', ['admin', 'moderator'])
+  .whereBetween('createdAt', startDate, endDate)
+  .sort('createdAt', -1)
+  .limit(10)
+  .populate('profile')
+  .execute();
+</code></pre>
+<h2>Performance Optimization Patterns</h2>
+<h3>1. Connection Pooling</h3>
+<p>Proper connection management is crucial for performance:</p>
+<pre><code class="language-javascript">class DatabaseManager {
+  constructor() {
+    this.pools = new Map();
+  }
+
+  createPool(config) {
+    const pool = new Pool({
+      host: config.host,
+      port: config.port,
+      database: config.database,
+      user: config.user,
+      password: config.password,
+      min: config.minConnections || 2,
+      max: config.maxConnections || 10,
+      idleTimeoutMillis: config.idleTimeout || 30000,
+      connectionTimeoutMillis: config.connectionTimeout || 2000,
+    });
+
+    this.pools.set(config.name, pool);
+    return pool;
+  }
+
+  getPool(name) {
+    return this.pools.get(name);
+  }
+
+  async query(poolName, sql, params) {
+    const pool = this.getPool(poolName);
+    if (!pool) {
+      throw new Error(`Pool ${poolName} not found`);
+    }
+
+    const client = await pool.connect();
+    try {
+      const result = await client.query(sql, params);
+      return result;
+    } finally {
+      client.release();
+    }
+  }
+
+  async closeAllPools() {
+    for (const [name, pool] of this.pools) {
+      await pool.end();
+    }
+    this.pools.clear();
+  }
+}
+</code></pre>
+<h3>2. Caching Strategy</h3>
+<p>Implementing effective caching patterns:</p>
+<pre><code class="language-javascript">class CacheManager {
+  constructor(redisClient) {
+    this.redis = redisClient;
+    this.defaultTTL = 3600; // 1 hour
+  }
+
+  async get(key) {
+    try {
+      const data = await this.redis.get(key);
+      return data ? JSON.parse(data) : null;
+    } catch (error) {
+      console.error('Cache get error:', error);
+      return null;
+    }
+  }
+
+  async set(key, value, ttl = this.defaultTTL) {
+    try {
+      await this.redis.setex(key, ttl, JSON.stringify(value));
+    } catch (error) {
+      console.error('Cache set error:', error);
+    }
+  }
+
+  async invalidate(pattern) {
+    try {
+      const keys = await this.redis.keys(pattern);
+      if (keys.length &gt; 0) {
+        await this.redis.del(...keys);
+      }
+    } catch (error) {
+      console.error('Cache invalidation error:', error);
+    }
+  }
+}
+
+// Cache-aware repository
+class CachedUserRepository extends UserRepository {
+  constructor(userModel, cacheManager) {
+    super(userModel);
+    this.cache = cacheManager;
+  }
+
+  async findById(id) {
+    const cacheKey = `user:${id}`;
+    let user = await this.cache.get(cacheKey);
+
+    if (!user) {
+      user = await super.findById(id);
+      if (user) {
+        await this.cache.set(cacheKey, user, 1800); // 30 minutes
+      }
+    }
+
+    return user;
+  }
+
+  async update(id, data) {
+    const user = await super.update(id, data);
+
+    // Invalidate cache
+    await this.cache.invalidate(`user:${id}`);
+
+    return user;
+  }
+}
+</code></pre>
+<h3>3. Database Sharding</h3>
+<p>For large-scale applications, sharding becomes necessary:</p>
+<pre><code class="language-javascript">class ShardManager {
+  constructor(shards) {
+    this.shards = shards;
+  }
+
+  getShardForKey(key) {
+    const hash = this.hashFunction(key);
+    const shardIndex = hash % this.shards.length;
+    return this.shards[shardIndex];
+  }
+
+  hashFunction(key) {
+    let hash = 0;
+    for (let i = 0; i &lt; key.length; i++) {
+      const char = key.charCodeAt(i);
+      hash = ((hash &lt;&lt; 5) - hash) + char;
+      hash = hash &amp; hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash);
+  }
+
+  async findById(id) {
+    const shard = this.getShardForKey(id.toString());
+    return await shard.findById(id);
+  }
+
+  async create(data) {
+    const shardKey = data.id || data._id || data.shardKey;
+    const shard = this.getShardForKey(shardKey.toString());
+    return await shard.create(data);
+  }
+}
+</code></pre>
+<h2>Data Migration Patterns</h2>
+<h3>1. Versioned Migrations</h3>
+<pre><code class="language-javascript">class MigrationManager {
+  constructor(database) {
+    this.db = database;
+    this.migrations = [];
+  }
+
+  addMigration(version, migration) {
+    this.migrations.push({ version, migration });
+    this.migrations.sort((a, b) =&gt; a.version - b.version);
+  }
+
+  async getCurrentVersion() {
+    const result = await this.db.collection('migrations')
+      .findOne({}, { sort: { version: -1 } });
+    return result ? result.version : 0;
+  }
+
+  async migrate() {
+    const currentVersion = await this.getCurrentVersion();
+    const pendingMigrations = this.migrations.filter(m =&gt; m.version &gt; currentVersion);
+
+    for (const migration of pendingMigrations) {
+      console.log(`Running migration ${migration.version}...`);
+
+      const session = this.db.startSession();
+      session.startTransaction();
+
+      try {
+        await migration.migration.up(this.db, session);
+        await this.db.collection('migrations').insertOne({
+          version: migration.version,
+          appliedAt: new Date()
+        }, { session });
+
+        await session.commitTransaction();
+        console.log(`Migration ${migration.version} completed`);
+      } catch (error) {
+        await session.abortTransaction();
+        console.error(`Migration ${migration.version} failed:`, error);
+        throw error;
+      } finally {
+        session.endSession();
+      }
+    }
+  }
+}
+
+// Example migration
+const migration1 = {
+  version: 1,
+  migration: {
+    async up(db, session) {
+      await db.collection('users').createIndex({ email: 1 }, { unique: true, session });
+      await db.collection('users').createIndex({ username: 1 }, { unique: true, session });
+    },
+    async down(db, session) {
+      await db.collection('users').dropIndex({ email: 1 }, { session });
+      await db.collection('users').dropIndex({ username: 1 }, { session });
+    }
+  }
+};
+</code></pre>
+<h3>2. Schema Evolution</h3>
+<pre><code class="language-javascript">class SchemaEvolution {
+  constructor(database) {
+    this.db = database;
+  }
+
+  async evolveDocuments(collection, transformer) {
+    const cursor = this.db.collection(collection).find({});
+
+    while (await cursor.hasNext()) {
+      const doc = await cursor.next();
+      const transformed = transformer(doc);
+
+      if (transformed !== doc) {
+        await this.db.collection(collection).replaceOne(
+          { _id: doc._id },
+          transformed
+        );
+      }
+    }
+  }
+}
+
+// Usage example
+const evolution = new SchemaEvolution(database);
+
+await evolution.evolveDocuments('users', (user) =&gt; {
+  // Add default preferences if not present
+  if (!user.preferences) {
+    user.preferences = {
+      theme: 'light',
+      notifications: {
+        email: true,
+        push: true
+      }
+    };
+  }
+
+  // Rename field if needed
+  if (user.fullName &amp;&amp; !user.profile.firstName) {
+    const [firstName, ...lastNameParts] = user.fullName.split(' ');
+    user.profile.firstName = firstName;
+    user.profile.lastName = lastNameParts.join(' ');
+    delete user.fullName;
+  }
+
+  return user;
+});
+</code></pre>
+<h2>Best Practices</h2>
+<ol>
+<li><strong>Index Strategy</strong>: Create indexes based on query patterns, not just intuition</li>
+<li><strong>Connection Management</strong>: Use connection pooling and monitor connection usage</li>
+<li><strong>Data Validation</strong>: Implement validation at both application and database level</li>
+<li><strong>Backup Strategy</strong>: Regular backups with tested restore procedures</li>
+<li><strong>Monitoring</strong>: Monitor query performance and database health metrics</li>
+<li><strong>Security</strong>: Use parameterized queries and proper authentication</li>
+</ol>
+<h2>Common Pitfalls to Avoid</h2>
+<ol>
+<li><strong>N+1 Query Problem</strong>: Use proper joins or batch loading</li>
+<li><strong>Over-indexing</strong>: Too many indexes can slow down writes</li>
+<li><strong>Ignoring Transactions</strong>: Use transactions for data consistency</li>
+<li><strong>Poor Schema Design</strong>: Avoid excessive normalization or denormalization</li>
+<li><strong>Memory Leaks</strong>: Properly close connections and clean up resources</li>
+</ol>
+<h2>Conclusion</h2>
+<p>Database design is a critical aspect of application development that deserves careful attention. By following these patterns and best practices, you can build robust, scalable, and maintainable database layers that will serve your application well as it grows.</p>
+<p>Remember that database design is not a one-time decision. As your application evolves, you'll need to adapt your database design accordingly. The key is to build with flexibility in mind while maintaining data integrity and performance.</p>
+<p>The patterns I've shared here are based on real-world experience and have proven effective in various scenarios. However, always consider your specific use case and requirements when making design decisions. What works for one application may not be the best choice for another.</p>
+<p>Keep learning, keep experimenting, and most importantly, keep measuring the performance of your database operations. Good database design is the foundation of a successful application.</p>
+                </div>
+            </article>
+        </div>
+    </main>
+    
+    <footer>
+        <p>&copy; 2025 我的博客. All rights reserved.</p>
+    </footer>
+</body>
+</html>
